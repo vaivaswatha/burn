@@ -1,0 +1,17 @@
+[package]
+name = "burn-pliron"
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+version.workspace = true
+authors = ["vaivaswatha <vaivaswatha@gmail.com>"]
+description = "pliron backend for the Burn framework"
+keywords = ["deep-learning", "machine-learning", "data", "pliron"]
+
+[dependencies]
+burn-tensor = { path = "../burn-tensor", default-features = false }
+burn-ndarray = { path = "../burn-ndarray", default-features = false }
+pliron = { git = "https://github.com/vaivaswatha/pliron.git" }
+
+[lints]
+workspace = true
