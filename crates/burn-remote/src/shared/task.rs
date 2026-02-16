@@ -1,10 +1,10 @@
+use burn_backend::{ExecutionError, TensorData};
 use burn_communication::{Address, data_service::TensorTransferId};
 use burn_ir::{OperationIr, TensorId, TensorIr};
 use burn_std::{
     DType,
     id::{IdGenerator, StreamId},
 };
-use burn_tensor::{TensorData, backend::ExecutionError};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -81,5 +81,7 @@ pub struct TaskResponse {
 pub enum TaskResponseContent {
     ReadTensor(Result<TensorData, ExecutionError>),
     SyncBackend(Result<(), ExecutionError>),
-    SupportsDType(bool),
+    // SupportsDType(DTypeUsageSet),
+    // TODO: Update to `DTypeUsageSet` when it implements `serde`.
+    SupportsDType(()),
 }

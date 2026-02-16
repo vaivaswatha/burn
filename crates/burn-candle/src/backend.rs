@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use burn_backend::{
-    BackTrace, Backend, DType, DeviceId, DeviceOps, ExecutionError, QTensorPrimitive,
+    BackTrace, Backend, DType, DTypeUsage, DeviceId, DeviceOps, ExecutionError, QTensorPrimitive,
     tensor::Device,
 };
 use burn_std::{
@@ -34,10 +34,7 @@ pub(crate) static SEED: Mutex<Option<StdRng>> = Mutex::new(None);
 
 pub(crate) fn get_seeded_rng() -> StdRng {
     let mut seed = SEED.lock().unwrap();
-    match seed.as_ref() {
-        Some(rng_seeded) => rng_seeded.clone(),
-        None => burn_std::rand::get_seeded_rng(),
-    }
+    seed.take().unwrap_or_else(burn_std::rand::get_seeded_rng)
 }
 
 pub(crate) fn set_seeded_rng(rng_seeded: StdRng) {
@@ -260,8 +257,12 @@ impl<F: FloatCandleElement, I: IntCandleElement> Backend for Candle<F, I> {
         Ok(())
     }
 
-    fn supports_dtype(_device: &Device<Self>, dtype: DType) -> bool {
-        dtype.try_into_dtype().is_ok()
+    fn dtype_usage(device: &Self::Device, dtype: DType) -> burn_backend::DTypeUsageSet {
+        if dtype.try_into_dtype().is_ok() {
+            burn_backend::DTypeUsage::general()
+        } else {
+            burn_backend::DTypeUsageSet::empty()
+        }
     }
 }
 

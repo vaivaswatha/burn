@@ -125,6 +125,65 @@ impl<const N: usize> ConvOptions<N> {
     }
 }
 
+/// Convolution options with support for asymmetric padding.
+///
+/// Wraps [`ConvOptions`] (which represents symmetric padding for the backend op)
+/// and adds optional asymmetric padding. When asymmetric padding is specified,
+/// the functional convolution layer applies an explicit pad operation before
+/// dispatching to the backend.
+///
+/// Implements `From<ConvOptions<N>>` for backward compatibility.
+#[derive(Debug, Clone)]
+pub struct PaddedConvOptions<const N: usize> {
+    /// The underlying convolution options for the backend.
+    pub options: ConvOptions<N>,
+    /// Padding at the end of each dimension (e.g., bottom/right for 2D).
+    /// If `None`, padding is symmetric (same as `options.padding`).
+    /// If `Some`, specifies different end-padding per dimension.
+    pub padding_end: Option<[usize; N]>,
+}
+
+impl<const N: usize> PaddedConvOptions<N> {
+    /// Creates options with asymmetric padding.
+    ///
+    /// `padding_start` is stored in `ConvOptions::padding`.
+    /// `padding_end` specifies the end padding per dimension.
+    pub fn asymmetric(
+        stride: [usize; N],
+        padding_start: [usize; N],
+        padding_end: [usize; N],
+        dilation: [usize; N],
+        groups: usize,
+    ) -> Self {
+        let options = ConvOptions::new(stride, padding_start, dilation, groups);
+        if padding_start == padding_end {
+            Self {
+                options,
+                padding_end: None,
+            }
+        } else {
+            Self {
+                options,
+                padding_end: Some(padding_end),
+            }
+        }
+    }
+
+    /// Returns true if padding is asymmetric.
+    pub fn is_asymmetric(&self) -> bool {
+        self.padding_end.is_some()
+    }
+}
+
+impl<const N: usize> From<ConvOptions<N>> for PaddedConvOptions<N> {
+    fn from(options: ConvOptions<N>) -> Self {
+        Self {
+            options,
+            padding_end: None,
+        }
+    }
+}
+
 /// Convolution options.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct DeformConvOptions<const N: usize> {
@@ -319,9 +378,7 @@ impl GridSampleOptions {
 /// Padding mode for tensor pad operations.
 ///
 /// Defines how values are filled when padding a tensor beyond its original boundaries.
-///
-/// **Note**: Currently, padding is only supported on the last two dimensions of a tensor
-/// (typically height and width for image data in NCHW format).
+/// Padding can be applied to any dimension of a tensor.
 ///
 /// # Modes
 ///
@@ -371,6 +428,23 @@ impl<E: ElementConversion> From<E> for PadMode {
 pub struct InterpolateBackward<B: Backend> {
     /// Gradient.
     pub x_grad: FloatTensor<B>,
+}
+
+/// Options for [attention](ModuleOps::attention).
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AttentionOptions {
+    /// Custom scale factor applied to QK^T. When `None`, defaults to `1/sqrt(head_dim)`.
+    pub scale: Option<f64>,
+
+    /// Soft capping applied before softmax: `softcap * tanh(scores / softcap)`.
+    /// Used by Gemma-2 and similar models. Must be positive when set.
+    pub softcap: Option<f64>,
+
+    /// When `true`, applies causal (autoregressive) masking so that each query position
+    /// can only attend to key positions at or before it. This is more efficient than
+    /// passing an explicit lower-triangular bool mask because backends can use optimized
+    /// kernel paths (e.g. flash attention with causal mode).
+    pub is_causal: bool,
 }
 
 /// Module operations trait.
@@ -706,7 +780,7 @@ pub trait ModuleOps<B: Backend> {
             // batch, channels, h_blocks, w_blocks, h_kern, w_kern
 
             let blocks = B::float_permute(blocks, &[0, 1, 4, 5, 2, 3]);
-            let shape = &blocks.shape().dims;
+            let shape = blocks.shape();
 
             // batch, channels, h_kern, w_kern, h_blocks, w_blocks
 
@@ -930,15 +1004,19 @@ pub trait ModuleOps<B: Backend> {
         options: InterpolateOptions,
     ) -> FloatTensor<B>;
 
-    /// Computes scaled dot-product attention: softmax(QKᵗ / √d) · V,
-    /// optionally applying a mask to the attention scores.
+    /// Computes scaled dot-product attention: softmax(QKᵗ * scale) · V,
+    /// where scale defaults to 1/sqrt(head_dim). Optionally applies masking,
+    /// additive bias, causal masking, and softcap to the attention scores.
     ///
     /// # Arguments
-    /// - `query`: Query tensor of shape `[batch_size, num_heads, seq_len_q,  head_dim]`
+    /// - `query`: Query tensor of shape `[batch_size, num_heads, seq_len_q, head_dim]`
     /// - `key`: Key tensor of shape `[batch_size, num_heads, seq_len_k, head_dim]`
     /// - `value`: Value tensor of shape `[batch_size, num_heads, seq_len_k, val_dim]`
     /// - `mask`: Optional boolean mask of shape `[batch_size, num_heads, seq_len_q, seq_len_k]`,
-    ///   here `true` indicates positions to mask (i.e. set to -∞ before softmax).
+    ///   where `true` indicates positions to mask (i.e. set to -inf before softmax).
+    /// - `attn_bias`: Optional float tensor of shape `[batch_size, num_heads, seq_len_q, seq_len_k]`
+    ///   added to the attention scores before softmax (e.g. ALiBi, relative position biases).
+    /// - `options`: Additional attention options (custom scale, softcap, causal masking).
     ///
     /// # Returns
     /// A tensor of shape `[batch_size, num_heads, seq_len_q, val_dim]`
@@ -952,8 +1030,10 @@ pub trait ModuleOps<B: Backend> {
         key: FloatTensor<B>,
         value: FloatTensor<B>,
         mask: Option<BoolTensor<B>>,
+        attn_bias: Option<FloatTensor<B>>,
+        options: AttentionOptions,
     ) -> FloatTensor<B> {
-        attention::naive_attention::<B>(query, key, value, mask)
+        attention::naive_attention::<B>(query, key, value, mask, attn_bias, options)
     }
 }
 
