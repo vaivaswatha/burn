@@ -8,7 +8,7 @@ use burn_backend::{Shape, ops::ConvTransposeOptions};
 use cubecl::{
     calculate_cube_count_elemwise,
     prelude::*,
-    std::{CubeOption, CubeOptionExpand, FastDivmod, tensor::layout::linear::LinearView},
+    std::{FastDivmod, tensor::layout::linear::LinearView},
 };
 use cubek::convolution::components::ConvSetupError;
 
@@ -27,7 +27,7 @@ struct ConvArgs {
 fn conv_transpose2d_direct_kernel<E: Numeric>(
     input: &Tensor<E>,
     weight: &Tensor<E>,
-    bias: &CubeOption<Tensor<E>>,
+    bias: &Option<Tensor<E>>,
     output: &mut LinearView<E, ReadWrite>,
     out_shape: Sequence<FastDivmod<usize>>,
     args: ConvArgs,
@@ -71,10 +71,8 @@ fn conv_transpose2d_direct_kernel<E: Numeric>(
     let idx_input_batch = batch * input.stride(0);
     let idx_weight_oc = out_c * weight.stride(1);
 
-    let mut sum = match bias {
-        CubeOption::Some(bias) => bias[oc_out],
-        CubeOption::None => E::from_int(0),
-    };
+    let bias: Option<E> = bias.map(|bias| bias[oc_out]);
+    let mut sum = bias.unwrap_or_default();
 
     let numerator_h_base = out_y + args.padding_0;
     let numerator_w_base = out_x + args.padding_1;
@@ -134,8 +132,8 @@ pub fn conv_transpose2d_direct<R: CubeRuntime>(
     bias: Option<CubeTensor<R>>,
     options: ConvTransposeOptions<2>,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
-    let [batch_size, _, in_height, in_width] = input.shape.dims();
-    let [_, out_channels, kernel_0, kernel_1] = weight.shape.dims();
+    let [batch_size, _, in_height, in_width] = input.meta.shape().dims();
+    let [_, out_channels, kernel_0, kernel_1] = weight.meta.shape().dims();
 
     let out_0 = (in_height - 1) * options.stride[0]
         + options.dilation[0] * (kernel_0 - 1)
@@ -157,7 +155,7 @@ pub fn conv_transpose2d_direct<R: CubeRuntime>(
         input.dtype,
     );
 
-    let num_elems = output.shape.num_elements();
+    let num_elems = output.meta.num_elements();
     let cube_dim = CubeDim::new(&input.client, num_elems);
     let cube_count = calculate_cube_count_elemwise(&input.client, num_elems, cube_dim);
 

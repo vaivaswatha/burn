@@ -1,7 +1,7 @@
 use cubecl::{
     calculate_cube_count_elemwise,
     prelude::*,
-    std::{CubeOption, CubeOptionExpand, FastDivmod, tensor::layout::linear::LinearView},
+    std::{FastDivmod, tensor::layout::linear::LinearView},
 };
 
 use crate::{
@@ -30,7 +30,7 @@ struct ConvArgs {
 fn conv_transpose3d_kernel<E: Numeric>(
     input: &Tensor<E>,
     weight: &Tensor<E>,
-    bias: &CubeOption<Tensor<E>>,
+    bias: &Option<Tensor<E>>,
     output: &mut LinearView<E, ReadWrite>,
     out_shape: Sequence<FastDivmod<usize>>,
     args: ConvArgs,
@@ -80,10 +80,8 @@ fn conv_transpose3d_kernel<E: Numeric>(
     let index_input_batch = batch * input.stride(0);
     let index_weight_out_c = out_channel * weight.stride(1);
 
-    let mut sum = match bias {
-        CubeOption::Some(bias) => bias[out_c_out],
-        CubeOption::None => E::from_int(0),
-    };
+    let bias: Option<E> = bias.map(|bias| bias[out_c_out]);
+    let mut sum = bias.unwrap_or_default();
 
     let numerator_d_base = out_z + args.padding_0;
     let numerator_h_base = out_y + args.padding_1;
@@ -157,8 +155,8 @@ pub(crate) fn conv_transpose3d<R: CubeRuntime>(
     bias: Option<CubeTensor<R>>,
     options: ConvTransposeOptions<3>,
 ) -> Result<CubeTensor<R>, LaunchError> {
-    let [batch_size, _, in_depth, in_height, in_width] = input.shape.dims();
-    let [_, out_channels, kernel_0, kernel_1, kernel_2] = weight.shape.dims();
+    let [batch_size, _, in_depth, in_height, in_width] = input.meta.shape().dims();
+    let [_, out_channels, kernel_0, kernel_1, kernel_2] = weight.meta.shape().dims();
 
     let out_0 = (in_depth - 1) * options.stride[0]
         + options.dilation[0] * (kernel_0 - 1)
@@ -191,7 +189,7 @@ pub(crate) fn conv_transpose3d<R: CubeRuntime>(
         input.dtype,
     );
 
-    let num_elems = output.shape.num_elements();
+    let num_elems = output.meta.num_elements();
     let cube_dim = CubeDim::new(&input.client, num_elems);
     let cube_count = calculate_cube_count_elemwise(&input.client, num_elems, cube_dim);
 

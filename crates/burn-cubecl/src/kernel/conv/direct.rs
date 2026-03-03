@@ -8,8 +8,11 @@ use crate::{
     tensor::CubeTensor,
 };
 use crate::{kernel::utils::decompose_linear, ops::numeric::empty_device_dtype};
-use burn_backend::ops::{ConvOptions, conv::calculate_conv_output_sizes};
-use cubecl::std::{CubeOption, CubeOptionExpand, FastDivmod, FastDivmodArgs};
+use burn_backend::{
+    TensorMetadata,
+    ops::{ConvOptions, conv::calculate_conv_output_sizes},
+};
+use cubecl::std::{FastDivmod, FastDivmodArgs};
 use cubecl::{
     calculate_cube_count_elemwise, prelude::*, std::tensor::layout::linear::LinearView,
     tensor_line_size_parallel,
@@ -33,7 +36,7 @@ struct Conv2dArgs {
 fn direct_conv2d_kernel<E: Numeric>(
     input: &Tensor<Line<E>>,
     weight: &Tensor<Line<E>>,
-    bias: CubeOption<Tensor<Line<E>>>,
+    bias: Option<Tensor<Line<E>>>,
     output: &mut LinearView<Line<E>, ReadWrite>,
     args: Conv2dArgs,
     shape_out: Sequence<FastDivmod<u32>>,
@@ -58,10 +61,8 @@ fn direct_conv2d_kernel<E: Numeric>(
     let g = out_c / args.channels_per_group;
     let ic_start = in_c_per_group * g;
 
-    let mut sum = match bias {
-        CubeOption::Some(bias) => bias[out_c as usize / line_size_out],
-        CubeOption::None => Line::empty(line_size_out).fill(E::from_int(0)),
-    };
+    let bias: Option<Line<E>> = bias.map(|bias| bias[out_c as usize / line_size_out]);
+    let mut sum = bias.unwrap_or_else(|| Line::empty(line_size_out).fill(E::from_int(0)));
 
     let in_offs = b as usize * input.stride(0) + ic_start as usize;
 
@@ -227,21 +228,21 @@ pub fn conv_direct<R: CubeRuntime, const N: usize>(
 ) -> Result<CubeTensor<R>, ConvSetupError> {
     let client = input.client.clone();
     let out_dtype = input.dtype;
-    let rank = input.shape.num_dims();
+    let rank = input.meta.shape().num_dims();
     let dim_c = rank - 1;
 
     // We only care about the channels here, everything else can be permuted
-    if input.strides[dim_c] != 1 {
+    if input.meta.strides()[dim_c] != 1 {
         input = into_contiguous_aligned(input);
     }
-    if weight.strides[dim_c] != 1 {
+    if weight.meta.strides()[dim_c] != 1 {
         weight = into_contiguous_aligned(weight);
     }
 
-    let batch_size = input.shape[0];
-    let in_shape = &input.shape[1..dim_c];
-    let out_channels = weight.shape[0];
-    let kernel_shape = &weight.shape[1..dim_c];
+    let batch_size = input.meta.shape()[0];
+    let in_shape = &input.meta.shape()[1..dim_c];
+    let out_channels = weight.meta.shape()[0];
+    let kernel_shape = &weight.meta.shape()[1..dim_c];
 
     let channels_per_group = out_channels / options.groups;
 
@@ -266,18 +267,18 @@ pub fn conv_direct<R: CubeRuntime, const N: usize>(
 
     // Need custom line size calculation here to account for the groups division. Need to vectorize
     // over `channels_per_group` instead.
-    let mut grouped_out_shape = output.shape.clone();
+    let mut grouped_out_shape = output.shape();
     grouped_out_shape[dim_c] = channels_per_group;
     let line_size_out = tensor_line_size_parallel(
-        input.client.io_optimized_line_sizes(&input.dtype.into()),
+        input.client.io_optimized_line_sizes(input.dtype.size()),
         &grouped_out_shape,
-        &output.strides,
+        output.meta.strides(),
         dim_c,
     );
     // Use channels_per_group instead of in_channels to avoid issues here
     let line_size_in = max_line_size(&weight);
 
-    let shape_out = output.shape[1..dim_c]
+    let shape_out = output.meta.shape()[1..dim_c]
         .iter()
         .map(|s| FastDivmodArgs::<u32>::new(&client, *s as u32))
         .collect();
@@ -293,7 +294,7 @@ pub fn conv_direct<R: CubeRuntime, const N: usize>(
         ));
     }
 
-    let working_units = output.shape.num_elements() / line_size_out;
+    let working_units = output.meta.num_elements() / line_size_out;
     let cube_dim = CubeDim::new(&input.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&input.client, working_units, cube_dim);
 
