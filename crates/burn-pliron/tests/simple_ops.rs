@@ -1,18 +1,27 @@
-//! Simple ops tests for pliron backend, mostly comparing with the ndarray backend.
+//! Simple ops tests for pliron backend
 
 #[cfg(test)]
 mod tests {
-    type GoldBackend = burn_ndarray::NdArray<f32>;
-    type GoldTensor<const D: usize> = burn_tensor::Tensor<GoldBackend, D>;
-    use burn_ndarray::NdArrayDevice as GoldDevice;
+    use burn_pliron::PlironDevice;
+    type PlironTensor<const D: usize> = burn_tensor::Tensor<burn_pliron::PlironBackend, D>;
+
+    #[test]
+    fn test_simple() {
+        let device = PlironDevice::default();
+        let a = PlironTensor::<2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
+        let a_ret = a.to_data();
+        assert!(a_ret.shape == [2, 2]);
+        assert_eq!(a_ret.to_string(), "[1.0, 2.0, 3.0, 4.0]");
+    }
 
     #[test]
     fn test_add() {
-        let device = GoldDevice::Cpu;
-        let a = GoldTensor::<2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
-        let b = GoldTensor::<2>::from_data([[5.0, 6.0], [7.0, 8.0]], &device);
+        let device = PlironDevice::default();
+        let a = PlironTensor::<2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
+        let b = PlironTensor::<2>::from_data([[5.0, 6.0], [7.0, 8.0]], &device);
         let c = a + b;
-        let expected = GoldTensor::<2>::from_data([[6.0, 8.0], [10.0, 12.0]], &device);
-        assert_eq!(c.to_data(), expected.to_data());
+        let c_data = c.to_data();
+        assert!(c_data.shape == [2, 2]);
+        assert_eq!(c_data.to_string(), "[6.0, 8.0, 10.0, 12.0]");
     }
 }

@@ -9,9 +9,12 @@ description = "pliron backend for the Burn framework"
 keywords = ["deep-learning", "machine-learning", "data", "pliron"]
 
 [dependencies]
+burn-backend = { path = "../burn-backend", default-features = false }
 burn-tensor = { path = "../burn-tensor", default-features = false }
 burn-ndarray = { path = "../burn-ndarray", default-features = false }
 pliron = { git = "https://github.com/vaivaswatha/pliron.git" }
+pliron-llvm = { git = "https://github.com/vaivaswatha/pliron.git" }
+pliron-common-dialects = { git = "https://github.com/vaivaswatha/pliron-common-dialects.git" }
 pliron-tensor = { git = "https://github.com/vaivaswatha/pliron-tensor.git" }
 
 [lints]
