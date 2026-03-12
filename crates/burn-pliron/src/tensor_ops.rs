@@ -168,12 +168,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn float_add(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironFloatTensor {
-        assert!(
-            is_pliron_ir_initialized(),
-            "Pliron IR must be initialized to convert a pliron tensor into data. \
-            This usually means that the tensor is not created from data, or the IR \
-            is cleared after execution."
-        );
+        assert!(is_pliron_ir_initialized(),);
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
             let sum = pliron_tensor::tensor::ops::AddOp::new(&mut ir.ctx, lhs.value, rhs.value);
@@ -190,7 +185,16 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn float_sub(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironFloatTensor {
-        todo!()
+        assert!(is_pliron_ir_initialized());
+        PLIRON_IR.with_borrow_mut(|ir| {
+            let ir = ir.as_mut().unwrap();
+            let diff = pliron_tensor::tensor::ops::SubOp::new(&mut ir.ctx, lhs.value, rhs.value);
+            ir.inserter.insert_op(&mut ir.ctx, diff);
+            PlironFloatTensor {
+                shape: lhs.shape.clone(),
+                value: diff.get_result(&ir.ctx),
+            }
+        })
     }
 
     fn float_sub_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {
@@ -198,7 +202,16 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn float_mul(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironFloatTensor {
-        todo!()
+        assert!(is_pliron_ir_initialized());
+        PLIRON_IR.with_borrow_mut(|ir| {
+            let ir = ir.as_mut().unwrap();
+            let prod = pliron_tensor::tensor::ops::MulOp::new(&mut ir.ctx, lhs.value, rhs.value);
+            ir.inserter.insert_op(&mut ir.ctx, prod);
+            PlironFloatTensor {
+                shape: lhs.shape.clone(),
+                value: prod.get_result(&ir.ctx),
+            }
+        })
     }
 
     fn float_mul_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {
@@ -206,7 +219,16 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn float_div(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironFloatTensor {
-        todo!()
+        assert!(is_pliron_ir_initialized());
+        PLIRON_IR.with_borrow_mut(|ir| {
+            let ir = ir.as_mut().unwrap();
+            let quot = pliron_tensor::tensor::ops::DivOp::new(&mut ir.ctx, lhs.value, rhs.value);
+            ir.inserter.insert_op(&mut ir.ctx, quot);
+            PlironFloatTensor {
+                shape: lhs.shape.clone(),
+                value: quot.get_result(&ir.ctx),
+            }
+        })
     }
 
     fn float_div_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {

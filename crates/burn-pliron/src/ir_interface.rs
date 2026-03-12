@@ -7,9 +7,9 @@ use pliron::{
     builtin::{op_interfaces::SingleBlockRegionInterface, types::Signedness},
     context::Context,
     irbuild::{
+        dialect_conversion::apply_dialect_conversion,
         inserter::{IRInserter, Inserter},
         listener::DummyListener,
-        match_rewrite::collect_rewrite,
     },
     op::{Op, verify_op},
     result::ExpectOk,
@@ -118,9 +118,9 @@ pub(crate) fn build_ranked_tensor_type(
 pub(crate) fn exec_pliron_ir(ir: &mut PlironIR) {
     let module = ir.module.unwrap();
     let module_operation = module.get_operation();
-    collect_rewrite(&mut ir.ctx, TensorToMemref, module_operation).expect_ok(&ir.ctx);
-    collect_rewrite(&mut ir.ctx, MemrefToCF, module_operation).expect_ok(&ir.ctx);
-    collect_rewrite(&mut ir.ctx, CFToLLVM, module_operation).expect_ok(&ir.ctx);
+    apply_dialect_conversion(&mut ir.ctx, &mut TensorToMemref, module_operation).expect_ok(&ir.ctx);
+    apply_dialect_conversion(&mut ir.ctx, &mut MemrefToCF, module_operation).expect_ok(&ir.ctx);
+    apply_dialect_conversion(&mut ir.ctx, &mut CFToLLVM, module_operation).expect_ok(&ir.ctx);
     verify_op(&module, &ir.ctx).expect_ok(&ir.ctx);
 
     let llvm_ctx = LLVMContext::default();

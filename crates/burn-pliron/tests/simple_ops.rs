@@ -24,4 +24,19 @@ mod tests {
         assert!(c_data.shape == [2, 2]);
         assert_eq!(c_data.to_string(), "[6.0, 8.0, 10.0, 12.0]");
     }
+
+    #[test]
+    fn test_sub_mul_div() {
+        let device = PlironDevice::default();
+        let a = PlironTensor::<2>::from_data([[10.0, 20.0], [30.0, 40.0]], &device);
+        let b = PlironTensor::<2>::from_data([[2.0, 4.0], [5.0, 8.0]], &device);
+        
+        let sub = a.clone() - b.clone();
+        let mul = sub * b.clone();
+        let div = mul / a.clone();
+
+        let div_data = div.to_data();
+        assert!(div_data.shape == [2, 2]);
+        assert_eq!(div_data.to_string(), "[1.6, 3.2, 4.166666666666667, 6.4]");
+    }
 }
