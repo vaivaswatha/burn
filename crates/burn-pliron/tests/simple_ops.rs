@@ -30,7 +30,7 @@ mod tests {
         let device = PlironDevice::default();
         let a = PlironTensor::<2>::from_data([[10.0, 20.0], [30.0, 40.0]], &device);
         let b = PlironTensor::<2>::from_data([[2.0, 4.0], [5.0, 8.0]], &device);
-        
+
         let sub = a.clone() - b.clone();
         let mul = sub * b.clone();
         let div = mul / a.clone();
@@ -39,4 +39,17 @@ mod tests {
         assert!(div_data.shape == [2, 2]);
         assert_eq!(div_data.to_string(), "[1.6, 3.2, 4.166666666666667, 6.4]");
     }
+
+    #[test]
+    fn test_recip() {
+        let device = PlironDevice::default();
+        let a = PlironTensor::<2>::from_data([[2.0, 4.0], [1.0, 2.0]], &device);
+
+        let recip = PlironTensor::<2>::recip(a);
+
+        let recip_data = recip.to_data();
+        assert!(recip_data.shape == [2, 2]);
+        assert_eq!(recip_data.to_string(), "[0.5, 0.25, 1.0, 0.5]");
+    }
+
 }
