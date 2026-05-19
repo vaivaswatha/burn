@@ -1,20 +1,17 @@
 use alloc::vec::Vec;
 use burn_std::{
-    Shape, Slice,
+    BoolDType, FloatDType, IntDType, Shape, Slice,
     quantization::{QuantPropagation, QuantScheme},
 };
 
 use crate::{
     Backend, ExecutionError, QTensorPrimitive, TensorData, TensorMetadata, TensorPrimitive,
+    get_device_settings,
 };
 use crate::{
     Scalar,
-    tensor::{
-        BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor,
-        quantization::{
-            Calibration, QuantizationParametersPrimitive, compute_q_params, compute_range,
-        },
-    },
+    quantization::{Calibration, QuantizationParametersPrimitive, compute_q_params, compute_range},
+    tensor::{BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor},
 };
 
 /// Automatically applies `dequantization -> float operation -> quantization`.
@@ -24,29 +21,30 @@ use crate::{
 macro_rules! dequant_op_quant {
     // Binary tensor float op w/ lhs & rhs
     (
-        ty $ty:ty, float_op $float_op:expr, $t1:expr, $t2:expr
+        float_op $float_op:expr, $t1:expr, $t2:expr
     ) => {{
         // Heuristic: prioritize lhs scheme
         let scheme = $t1.scheme().clone();
 
-        let t1_f = <$ty>::dequantize($t1);
-        let t2_f = <$ty>::dequantize($t2);
+        let t1_f = Self::dequantize($t1);
+        let t2_f = Self::dequantize($t2);
         #[allow(clippy::redundant_closure_call)]
         let out_f = $float_op(t1_f, t2_f);
 
-        <$ty>::quantize_dynamic(out_f, &scheme)
+        Self::quantize_dynamic(out_f, &scheme)
     }};
     // Unary tensor float op
     (
-        ty $ty:ty, float_op $float_op:expr, $tensor:expr
+        float_op $float_op:expr, $tensor:expr
     ) => {{
         let scheme = $tensor.scheme().clone();
+        let dtype = get_device_settings::<B>(&Self::q_device(&$tensor)).float_dtype;
 
-        let tensor_f = <$ty>::dequantize($tensor);
+        let tensor_f = Self::dequantize($tensor, dtype);
         #[allow(clippy::redundant_closure_call)]
         let out_f = $float_op(tensor_f);
 
-        <$ty>::quantize_dynamic(out_f, &scheme)
+        Self::quantize_dynamic(out_f, &scheme)
     }};
 }
 
@@ -58,38 +56,40 @@ macro_rules! dequant_op_quant {
 macro_rules! dequant_op_flow {
     // Binary tensor float op w/ lhs & rhs
     (
-        ty $ty:ty, float_op $float_op:expr, $t1:expr, $t2:expr
+        float_op $float_op:expr, $t1:expr, $t2:expr
     ) => {{
         // Heuristic: prioritize lhs scheme
         let scheme = $t1.scheme().clone();
         let propagation = $t1.propagation();
+        let dtype = get_device_settings::<B>(&Self::q_device(&$t1)).float_dtype;
 
-        let t1_f = <$ty>::dequantize($t1);
-        let t2_f = <$ty>::dequantize($t2);
+        let t1_f = Self::dequantize($t1, dtype);
+        let t2_f = Self::dequantize($t2, dtype);
         #[allow(clippy::redundant_closure_call)]
         let out_f = $float_op(t1_f, t2_f);
 
         match propagation {
             QuantPropagation::Propagate => {
-                TensorPrimitive::QFloat(<$ty>::quantize_dynamic(out_f, &scheme))
+                TensorPrimitive::QFloat(Self::quantize_dynamic(out_f, &scheme))
             }
             QuantPropagation::Inhibit => TensorPrimitive::Float(out_f),
         }
     }};
     // Unary tensor float op
     (
-        ty $ty:ty, float_op $float_op:expr, $tensor:expr
+        float_op $float_op:expr, $tensor:expr
     ) => {{
         let scheme = $tensor.scheme().clone();
         let propagation = $tensor.propagation();
+        let dtype = get_device_settings::<B>(&Self::q_device(&$tensor)).float_dtype;
 
-        let tensor_f = <$ty>::dequantize($tensor);
+        let tensor_f = Self::dequantize($tensor, dtype);
         #[allow(clippy::redundant_closure_call)]
         let out_f = $float_op(tensor_f);
 
         match propagation {
             QuantPropagation::Propagate => {
-                TensorPrimitive::QFloat(<$ty>::quantize_dynamic(out_f, &scheme))
+                TensorPrimitive::QFloat(Self::quantize_dynamic(out_f, &scheme))
             }
             QuantPropagation::Inhibit => TensorPrimitive::Float(out_f),
         }
@@ -148,7 +148,7 @@ pub trait QTensorOps<B: Backend> {
     }
 
     /// Convert the tensor back to a higher precision data type.
-    fn dequantize(tensor: QuantizedTensor<B>) -> FloatTensor<B>;
+    fn dequantize(tensor: QuantizedTensor<B>, dtype: FloatDType) -> FloatTensor<B>;
 
     /// Gets the device of the tensor.
     ///
@@ -314,8 +314,7 @@ pub trait QTensorOps<B: Backend> {
     ) -> QuantizedTensor<B> {
         // Default implementation. Backends can gather on the quantized values when supported.
         dequant_op_quant!(
-            ty Self,
-            float_op |tensor| B::float_gather(dim, tensor, indices),
+            float_op | tensor | B::float_gather(dim, tensor, indices),
             tensor
         )
     }
@@ -333,8 +332,7 @@ pub trait QTensorOps<B: Backend> {
     /// The tensor with the given dimension repeated.
     fn q_repeat_dim(tensor: QuantizedTensor<B>, dim: usize, times: usize) -> QuantizedTensor<B> {
         dequant_op_quant!(
-            ty Self,
-            float_op |tensor| B::float_repeat_dim(tensor, dim, times),
+            float_op | tensor | B::float_repeat_dim(tensor, dim, times),
             tensor
         )
     }
@@ -350,12 +348,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of adding the two tensors together.
     fn q_add(lhs: QuantizedTensor<B>, rhs: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |lhs, rhs| B::float_add(lhs, rhs),
-            lhs,
-            rhs
-        )
+        dequant_op_flow!(float_op | lhs, rhs | B::float_add(lhs, rhs), lhs, rhs)
     }
 
     /// Adds a scalar to a tensor.
@@ -369,11 +362,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of adding the scalar to the tensor.
     fn q_add_scalar(lhs: QuantizedTensor<B>, rhs: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_add_scalar(tensor, rhs),
-            lhs
-        )
+        dequant_op_flow!(float_op | tensor | B::float_add_scalar(tensor, rhs), lhs)
     }
 
     /// Clamps a tensor under a minimum value.
@@ -387,11 +376,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The clamped tensor.
     fn q_clamp_min(tensor: QuantizedTensor<B>, min: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_clamp_min(tensor, min),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_clamp_min(tensor, min), tensor)
     }
 
     /// Clamps a tensor over a maximum value.
@@ -405,11 +390,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The clamped tensor.
     fn q_clamp_max(tensor: QuantizedTensor<B>, max: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_clamp_max(tensor, max),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_clamp_max(tensor, max), tensor)
     }
 
     /// Clamps a tensor between a minimum and maximum value.
@@ -424,11 +405,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The clamped tensor.
     fn q_clamp(tensor: QuantizedTensor<B>, min: Scalar, max: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_clamp(tensor, min, max),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_clamp(tensor, min, max), tensor)
     }
 
     /// Subtracts two tensors.
@@ -442,12 +419,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of subtracting the two tensors.
     fn q_sub(lhs: QuantizedTensor<B>, rhs: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |lhs, rhs| B::float_sub(lhs, rhs),
-            lhs,
-            rhs
-        )
+        dequant_op_flow!(float_op | lhs, rhs | B::float_sub(lhs, rhs), lhs, rhs)
     }
 
     /// Subtracts a scalar from a tensor.
@@ -461,21 +433,12 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of subtracting the scalar from the tensor.
     fn q_sub_scalar(lhs: QuantizedTensor<B>, rhs: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_sub_scalar(tensor, rhs),
-            lhs
-        )
+        dequant_op_flow!(float_op | tensor | B::float_sub_scalar(tensor, rhs), lhs)
     }
 
     /// Multiplies two tensors together element-wise.
     fn q_mul(lhs: QuantizedTensor<B>, rhs: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |lhs, rhs| B::float_mul(lhs, rhs),
-            lhs,
-            rhs
-        )
+        dequant_op_flow!(float_op | lhs, rhs | B::float_mul(lhs, rhs), lhs, rhs)
     }
 
     /// Multiplies a tensor by a scalar.
@@ -489,11 +452,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of multiplying the tensor by the scalar.
     fn q_mul_scalar(lhs: QuantizedTensor<B>, rhs: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_mul_scalar(tensor, rhs),
-            lhs
-        )
+        dequant_op_flow!(float_op | tensor | B::float_mul_scalar(tensor, rhs), lhs)
     }
 
     /// Divides two tensors element-wise.
@@ -507,12 +466,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of dividing the two tensors.
     fn q_div(lhs: QuantizedTensor<B>, rhs: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |lhs, rhs| B::float_div(lhs, rhs),
-            lhs,
-            rhs
-        )
+        dequant_op_flow!(float_op | lhs, rhs | B::float_div(lhs, rhs), lhs, rhs)
     }
 
     /// Divides a tensor by a scalar.
@@ -526,11 +480,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The result of dividing the tensor by the scalar.
     fn q_div_scalar(lhs: QuantizedTensor<B>, rhs: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_div_scalar(tensor, rhs),
-            lhs
-        )
+        dequant_op_flow!(float_op | tensor | B::float_div_scalar(tensor, rhs), lhs)
     }
 
     /// Multiplies two tensors together using matrix multiplication.
@@ -546,12 +496,28 @@ pub trait QTensorOps<B: Backend> {
     fn q_matmul(lhs: TensorPrimitive<B>, rhs: TensorPrimitive<B>) -> TensorPrimitive<B> {
         let mut propagation = QuantPropagation::Inhibit;
         let mut scheme = QuantScheme::default();
+
+        // Pick a target dtype for any dequantization. If either operand is already
+        // a Float tensor, take its dtype so a Float-QFloat (or QFloat-Float) pair
+        // ends up matching after dequantize and `float_matmul` doesn't see a
+        // dtype mismatch. Only when both operands are QFloat do we fall back to
+        // the device default.
+        let target_dtype: Option<FloatDType> = match (&lhs, &rhs) {
+            (TensorPrimitive::Float(t), _) | (_, TensorPrimitive::Float(t)) => {
+                Some(t.dtype().into())
+            }
+            _ => None,
+        };
+
         let lhs = match lhs {
             TensorPrimitive::Float(lhs) => lhs,
             TensorPrimitive::QFloat(lhs) => {
                 propagation = lhs.propagation();
                 scheme = *lhs.scheme();
-                Self::dequantize(lhs)
+                let float_dtype = target_dtype
+                    .unwrap_or_else(|| get_device_settings::<B>(&Self::q_device(&lhs)).float_dtype);
+
+                Self::dequantize(lhs, float_dtype)
             }
         };
         let rhs = match rhs {
@@ -559,7 +525,10 @@ pub trait QTensorOps<B: Backend> {
             TensorPrimitive::QFloat(rhs) => {
                 propagation = rhs.propagation();
                 scheme = *rhs.scheme();
-                Self::dequantize(rhs)
+                let float_dtype = target_dtype
+                    .unwrap_or_else(|| get_device_settings::<B>(&Self::q_device(&rhs)).float_dtype);
+
+                Self::dequantize(rhs, float_dtype)
             }
         };
 
@@ -574,20 +543,12 @@ pub trait QTensorOps<B: Backend> {
 
     /// Negates a tensor element-wise.
     fn q_neg(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_neg(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_neg(tensor), tensor)
     }
 
     /// Calculates the reciprocals element-wise
     fn q_recip(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_recip(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_recip(tensor), tensor)
     }
 
     /// Sum of all elements in a tensor.
@@ -600,11 +561,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A scalar tensor with the sum of all elements in `tensor`.
     fn q_sum(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_sum(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_sum(tensor), tensor)
     }
 
     /// Sum of all elements in a tensor along a dimension.
@@ -618,11 +575,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the sum of all elements in `tensor` along `dim`.
     fn q_sum_dim(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_sum_dim(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_sum_dim(tensor, dim), tensor)
     }
 
     /// Product of all elements in a tensor.
@@ -635,11 +588,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A scalar tensor with the product of all elements in `tensor`.
     fn q_prod(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_prod(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_prod(tensor), tensor)
     }
 
     /// Product of all elements in a tensor along a dimension.
@@ -652,11 +601,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the product of all elements in `tensor` along `dim`.
     fn q_prod_dim(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_prod_dim(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_prod_dim(tensor, dim), tensor)
     }
 
     /// Mean of all elements in a tensor.
@@ -669,11 +614,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A scalar tensor with the mean of all elements in `tensor`.
     fn q_mean(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_mean(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_mean(tensor), tensor)
     }
 
     /// Mean of all elements in a tensor along a dimension.
@@ -687,11 +628,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the mean of all elements in `tensor` along `dim`.
     fn q_mean_dim(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_mean_dim(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_mean_dim(tensor, dim), tensor)
     }
 
     /// Computes the cumulative sum of elements along a dimension.
@@ -706,11 +643,7 @@ pub trait QTensorOps<B: Backend> {
     /// A tensor with the same shape where each element is the cumulative sum
     /// of all elements up to and including that position along the dimension.
     fn q_cumsum(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_cumsum(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_cumsum(tensor, dim), tensor)
     }
 
     /// Computes the cumulative product of elements along a dimension.
@@ -725,11 +658,7 @@ pub trait QTensorOps<B: Backend> {
     /// A tensor with the same shape where each element is the cumulative product
     /// of all elements up to and including that position along the dimension.
     fn q_cumprod(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_cumprod(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_cumprod(tensor, dim), tensor)
     }
 
     /// Computes the cumulative minimum of elements along a dimension.
@@ -744,11 +673,7 @@ pub trait QTensorOps<B: Backend> {
     /// A tensor with the same shape where each element is the minimum
     /// of all elements up to and including that position along the dimension.
     fn q_cummin(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_cummin(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_cummin(tensor, dim), tensor)
     }
 
     /// Computes the cumulative maximum of elements along a dimension.
@@ -763,11 +688,7 @@ pub trait QTensorOps<B: Backend> {
     /// A tensor with the same shape where each element is the maximum
     /// of all elements up to and including that position along the dimension.
     fn q_cummax(tensor: QuantizedTensor<B>, dim: usize) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_cummax(tensor, dim),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_cummax(tensor, dim), tensor)
     }
 
     /// Returns a new tensor with exponential values.
@@ -780,11 +701,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with exponential values.
     fn q_exp(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_exp(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_exp(tensor), tensor)
     }
 
     /// Returns a new tensor with natural logarithm values.
@@ -797,11 +714,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with natural logarithm values.
     fn q_log(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_log(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_log(tensor), tensor)
     }
 
     /// Returns a new tensor with logarithm values of (1 + Xi).
@@ -814,11 +727,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with logarithm values of (1 + Xi).
     fn q_log1p(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_log1p(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_log1p(tensor), tensor)
     }
 
     /// Element-wise power with another tensor.
@@ -832,12 +741,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The elements of `lhs` raised to the power of the elements of `rhs`.
     fn q_powf(lhs: QuantizedTensor<B>, rhs: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |lhs, rhs| B::float_powf(lhs, rhs),
-            lhs,
-            rhs
-        )
+        dequant_op_flow!(float_op | lhs, rhs | B::float_powf(lhs, rhs), lhs, rhs)
     }
 
     /// Element-wise power with an IntTensor.
@@ -851,11 +755,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The elements of `lhs` raised to the value of `rhs`. Result is an IntTensor.
     fn q_powi(lhs: QuantizedTensor<B>, rhs: IntTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_powi(tensor, rhs),
-            lhs
-        )
+        dequant_op_flow!(float_op | tensor | B::float_powi(tensor, rhs), lhs)
     }
 
     /// Element-wise power with an int scalar.
@@ -869,11 +769,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// The elements of `lhs` raised to the value of `rhs`.
     fn q_powi_scalar(lhs: QuantizedTensor<B>, rhs: Scalar) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_powi_scalar(tensor, rhs),
-            lhs
-        )
+        dequant_op_flow!(float_op | tensor | B::float_powi_scalar(tensor, rhs), lhs)
     }
 
     /// Element-wise power with a float scalar.
@@ -888,8 +784,7 @@ pub trait QTensorOps<B: Backend> {
     /// A tensor with the same shape as `tensor` with values raised to the power of `value`.
     fn q_powf_scalar(tensor: QuantizedTensor<B>, value: Scalar) -> TensorPrimitive<B> {
         dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_powf_scalar(tensor, value),
+            float_op | tensor | B::float_powf_scalar(tensor, value),
             tensor
         )
     }
@@ -904,11 +799,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with square root values.
     fn q_sqrt(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_sqrt(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_sqrt(tensor), tensor)
     }
 
     /// Returns a new tensor with absolute values.
@@ -921,11 +812,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with absolute values.
     fn q_abs(tensor: QuantizedTensor<B>) -> QuantizedTensor<B> {
-        dequant_op_quant!(
-            ty Self,
-            float_op |tensor| B::float_abs(tensor),
-            tensor
-        )
+        dequant_op_quant!(float_op | tensor | B::float_abs(tensor), tensor)
     }
 
     /// Returns a new tensor with cosine values.
@@ -938,11 +825,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with cosine values.
     fn q_cos(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_cos(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_cos(tensor), tensor)
     }
 
     /// Returns a new tensor with sine values.
@@ -955,11 +838,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with sine values.
     fn q_sin(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_sin(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_sin(tensor), tensor)
     }
 
     /// Returns a new tensor with tangent values.
@@ -972,11 +851,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with tangent values.
     fn q_tan(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_tan(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_tan(tensor), tensor)
     }
 
     /// Returns a new tensor with hyperbolic cosine values.
@@ -989,11 +864,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with hyperbolic cosine values.
     fn q_cosh(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_cosh(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_cosh(tensor), tensor)
     }
 
     /// Returns a new tensor with hyperbolic sine values.
@@ -1006,11 +877,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with hyperbolic sine values.
     fn q_sinh(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_sinh(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_sinh(tensor), tensor)
     }
 
     /// Returns a new tensor with hyperbolic tangent values.
@@ -1023,11 +890,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with hyperbolic tangent values.
     fn q_tanh(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_tanh(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_tanh(tensor), tensor)
     }
 
     /// Returns a new tensor with the error function values.
@@ -1040,11 +903,7 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the same shape as `tensor` with error function values.
     fn q_erf(tensor: QuantizedTensor<B>) -> TensorPrimitive<B> {
-        dequant_op_flow!(
-            ty Self,
-            float_op |tensor| B::float_erf(tensor),
-            tensor
-        )
+        dequant_op_flow!(float_op | tensor | B::float_erf(tensor), tensor)
     }
 
     /// Concatenates tensors along a dimension.
@@ -1059,11 +918,13 @@ pub trait QTensorOps<B: Backend> {
     /// A tensor with the concatenated tensors along `dim`.
     fn q_cat(tensors: Vec<QuantizedTensor<B>>, dim: usize) -> QuantizedTensor<B> {
         // Heuristic: prioritize first tensor scheme
-        let scheme = *tensors.first().unwrap().scheme();
+        let first = tensors.first().unwrap();
+        let scheme = *first.scheme();
+        let dtype = get_device_settings::<B>(&Self::q_device(first)).float_dtype;
 
         let tensor_f = tensors
             .into_iter()
-            .map(|tensor| Self::dequantize(tensor))
+            .map(|tensor| Self::dequantize(tensor, dtype))
             .collect();
 
         let out_f = B::float_cat(tensor_f, dim);
@@ -1077,14 +938,55 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// * `tensor` - The tensor to get the maximum elements of.
     /// * `dim` - The dimension along which to get the maximum elements.
+    /// * `out_dtype` - The output tensor dtype.
     ///
     /// # Returns
     ///
     /// A tensor with the indices of the maximum elements of `tensor` along `dim`.
-    fn q_argmax(tensor: QuantizedTensor<B>, dim: usize) -> IntTensor<B> {
-        // Default implementation. Backends can sort on the int values since qparams remain the same.
-        let tensor_f = Self::dequantize(tensor);
-        B::float_argmax(tensor_f, dim)
+    fn q_argmax(tensor: QuantizedTensor<B>, dim: usize, out_dtype: IntDType) -> IntTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_argmax(tensor_f, dim, out_dtype)
+    }
+
+    /// Gets the indices of the k maximum elements of a tensor along an axis.
+    /// If two elements are equals, order them by the lowest indices
+    ///
+    /// # Arguments
+    ///
+    /// * `tensor` - The tensor to get the k maximum elements of.
+    /// * `dim` - The dimension along which to get the maximum elements.
+    /// * `k` - number of k maximums to keep
+    /// * `out_dtype` - The output tensor dtype.
+    ///
+    /// # Returns
+    ///
+    /// A tensor with the indices of the `k` maximum elements of `tensor` along `dim`.
+    fn q_argtopk(
+        tensor: QuantizedTensor<B>,
+        dim: usize,
+        k: usize,
+        out_dtype: IntDType,
+    ) -> IntTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_argtopk(tensor_f, dim, k, out_dtype)
+    }
+
+    /// Gets the values of the k maximum elements of a tensor along an axis.
+    ///
+    /// # Arguments
+    ///
+    /// * `tensor` - The tensor to get the k maximum elements of.
+    /// * `dim` - The dimension along which to get the maximum elements.
+    /// * `k` - number of k maximums to keep
+    /// * `out_dtype` - The output tensor dtype.
+    ///
+    /// # Returns
+    ///
+    /// A tensor with the values of the `k` maximum elements of `tensor` along `dim`.
+    fn q_topk(tensor: QuantizedTensor<B>, dim: usize, k: usize) -> QuantizedTensor<B> {
+        dequant_op_quant!(float_op | tensor | B::float_topk(tensor, dim, k), tensor)
     }
 
     /// Gets the indices of the minimum elements of a tensor along an axis.
@@ -1093,14 +995,15 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// * `tensor` - The tensor to get the minimum elements of.
     /// * `dim` - The dimension along which to get the minimum elements.
+    /// * `out_dtype` - The output tensor dtype.
     ///
     /// # Returns
     ///
     /// A tensor with the indices of the minimum elements of `tensor` along `dim`.
-    fn q_argmin(tensor: QuantizedTensor<B>, dim: usize) -> IntTensor<B> {
-        // Default implementation. Backends can sort on the int values since qparams remain the same.
-        let tensor_f = Self::dequantize(tensor);
-        B::float_argmin(tensor_f, dim)
+    fn q_argmin(tensor: QuantizedTensor<B>, dim: usize, out_dtype: IntDType) -> IntTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_argmin(tensor_f, dim, out_dtype)
     }
 
     /// Gets the maximum element of a tensor.
@@ -1130,7 +1033,8 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the maximum elements of `tensor` along `dim`.
     fn q_max_dim(tensor: QuantizedTensor<B>, dim: usize) -> QuantizedTensor<B> {
-        let index = B::q_argmax(tensor.clone(), dim);
+        let int_dtype = get_device_settings::<B>(&B::q_device(&tensor)).int_dtype;
+        let index = B::q_argmax(tensor.clone(), dim, int_dtype);
 
         B::q_gather(dim, tensor, index)
     }
@@ -1148,8 +1052,9 @@ pub trait QTensorOps<B: Backend> {
     fn q_max_dim_with_indices(
         tensor: QuantizedTensor<B>,
         dim: usize,
+        out_dtype: IntDType,
     ) -> (QuantizedTensor<B>, IntTensor<B>) {
-        let index = B::q_argmax(tensor.clone(), dim);
+        let index = B::q_argmax(tensor.clone(), dim, out_dtype);
         let values = B::q_gather(dim, tensor, index.clone());
 
         (values, index)
@@ -1182,7 +1087,8 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the minimum elements of `tensor` along `dim`.
     fn q_min_dim(tensor: QuantizedTensor<B>, dim: usize) -> QuantizedTensor<B> {
-        let index = B::q_argmin(tensor.clone(), dim);
+        let int_dtype = get_device_settings::<B>(&B::q_device(&tensor)).int_dtype;
+        let index = B::q_argmin(tensor.clone(), dim, int_dtype);
 
         B::q_gather(dim, tensor, index)
     }
@@ -1200,8 +1106,9 @@ pub trait QTensorOps<B: Backend> {
     fn q_min_dim_with_indices(
         tensor: QuantizedTensor<B>,
         dim: usize,
+        out_dtype: IntDType,
     ) -> (QuantizedTensor<B>, IntTensor<B>) {
-        let index = B::q_argmin(tensor.clone(), dim);
+        let index = B::q_argmin(tensor.clone(), dim, out_dtype);
         let values = B::q_gather(dim, tensor, index.clone());
 
         (values, index)
@@ -1234,7 +1141,8 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A tensor with the maximum elements of `tensor` along `dim`.
     fn q_max_abs_dim(tensor: QuantizedTensor<B>, dim: usize) -> QuantizedTensor<B> {
-        let index = B::q_argmax(B::q_abs(tensor.clone()), dim);
+        let int_dtype = get_device_settings::<B>(&B::q_device(&tensor)).int_dtype;
+        let index = B::q_argmax(B::q_abs(tensor.clone()), dim, int_dtype);
 
         B::q_gather(dim, tensor, index)
     }
@@ -1248,9 +1156,10 @@ pub trait QTensorOps<B: Backend> {
     /// # Returns
     ///
     /// A boolean tensor with a single element, True if any element in the tensor is True, False otherwise.
-    fn q_any(tensor: QuantizedTensor<B>) -> BoolTensor<B> {
-        let tensor_f = Self::dequantize(tensor);
-        B::float_any(tensor_f)
+    fn q_any(tensor: QuantizedTensor<B>, out_dtype: BoolDType) -> BoolTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_any(tensor_f, out_dtype)
     }
 
     /// Tests if any element in the float `tensor` evaluates to True along a given dimension `dim`.
@@ -1265,9 +1174,10 @@ pub trait QTensorOps<B: Backend> {
     /// A boolean tensor `Tensor<B, D, Bool>` with the same size as input `tensor`, except in the `dim` axis
     /// where the size is 1. The elem in the `dim` axis is True if any element along this dim in the
     /// input evaluates to True, False otherwise.
-    fn q_any_dim(tensor: QuantizedTensor<B>, dim: usize) -> BoolTensor<B> {
-        let tensor_f = Self::dequantize(tensor);
-        B::float_any_dim(tensor_f, dim)
+    fn q_any_dim(tensor: QuantizedTensor<B>, dim: usize, out_dtype: BoolDType) -> BoolTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_any_dim(tensor_f, dim, out_dtype)
     }
 
     /// Tests if all elements in the `tensor` evaluate to True.
@@ -1280,9 +1190,10 @@ pub trait QTensorOps<B: Backend> {
     ///
     /// A boolean tensor `Tensor<B, 1, Bool>` with a single element, True if all elements in the input tensor
     /// evaluate to True, False otherwise.
-    fn q_all(tensor: QuantizedTensor<B>) -> BoolTensor<B> {
-        let tensor_f = Self::dequantize(tensor);
-        B::float_all(tensor_f)
+    fn q_all(tensor: QuantizedTensor<B>, out_dtype: BoolDType) -> BoolTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_all(tensor_f, out_dtype)
     }
 
     /// Tests if all elements in the `tensor` evaluate to True along a given dimension `dim`.
@@ -1297,9 +1208,10 @@ pub trait QTensorOps<B: Backend> {
     /// A boolean tensor `Tensor<B, D, Bool>` with the same size as input `tensor`, except in the `dim` axis
     /// where the size is 1. The elem in the `dim` axis is True if all elements along this dim in the input
     /// evaluates to True, False otherwise.
-    fn q_all_dim(tensor: QuantizedTensor<B>, dim: usize) -> BoolTensor<B> {
-        let tensor_f = Self::dequantize(tensor);
-        B::float_all_dim(tensor_f, dim)
+    fn q_all_dim(tensor: QuantizedTensor<B>, dim: usize, out_dtype: BoolDType) -> BoolTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_all_dim(tensor_f, dim, out_dtype)
     }
 
     /// Sort the elements of the input `tensor` by value in along a given dimension.
@@ -1318,8 +1230,7 @@ pub trait QTensorOps<B: Backend> {
     fn q_sort(tensor: QuantizedTensor<B>, dim: usize, descending: bool) -> QuantizedTensor<B> {
         // Default implementation. Backends can sort on the int values since qparams remain the same.
         dequant_op_quant!(
-            ty Self,
-            float_op |tensor| B::float_sort(tensor, dim, descending),
+            float_op | tensor | B::float_sort(tensor, dim, descending),
             tensor
         )
     }
@@ -1342,12 +1253,13 @@ pub trait QTensorOps<B: Backend> {
         tensor: QuantizedTensor<B>,
         dim: usize,
         descending: bool,
+        out_dtype: IntDType,
     ) -> (QuantizedTensor<B>, IntTensor<B>) {
-        // Default implementation. Backends can sort on the int values since qparams remain the same.
         let scheme = *tensor.scheme();
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
 
-        let tensor_f = Self::dequantize(tensor);
-        let (out_f, indices) = B::float_sort_with_indices(tensor_f, dim, descending);
+        let tensor_f = Self::dequantize(tensor, dtype);
+        let (out_f, indices) = B::float_sort_with_indices(tensor_f, dim, descending, out_dtype);
 
         (Self::quantize_dynamic(out_f, &scheme), indices)
     }
@@ -1365,9 +1277,14 @@ pub trait QTensorOps<B: Backend> {
     /// # Returns
     ///
     /// A tensor with the same shape as the input tensor the indices map back to the original input tensor.
-    fn q_argsort(tensor: QuantizedTensor<B>, dim: usize, descending: bool) -> IntTensor<B> {
-        // Default implementation. Backends can sort on the int values since qparams remain the same.
-        let tensor_f = Self::dequantize(tensor);
-        B::float_argsort(tensor_f, dim, descending)
+    fn q_argsort(
+        tensor: QuantizedTensor<B>,
+        dim: usize,
+        descending: bool,
+        out_dtype: IntDType,
+    ) -> IntTensor<B> {
+        let dtype = get_device_settings::<B>(&Self::q_device(&tensor)).float_dtype;
+        let tensor_f = Self::dequantize(tensor, dtype);
+        B::float_argsort(tensor_f, dim, descending, out_dtype)
     }
 }

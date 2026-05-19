@@ -33,6 +33,12 @@ pub enum QuantAcc {
     BF16,
 }
 
+/// Calibration method used to compute the quantization range mapping.
+pub enum Calibration {
+    /// Computes quantization range mapping based on the min and max values.
+    MinMax,
+}
+
 /// Specify if the output of an operation is quantized using the scheme of the input
 /// or returned unquantized.
 #[derive(
@@ -210,7 +216,7 @@ impl QuantizedBytes {
             QuantStore::PackedU32(_) => match self.scheme.value {
                 QuantValue::Q8F | QuantValue::Q8S => self.split_i8_values(num_params),
                 QuantValue::Q4F | QuantValue::Q4S | QuantValue::Q2F | QuantValue::Q2S => {
-                    let mut values = self.bytes.try_into_vec::<u32>().unwrap();
+                    let mut values = bytemuck::cast_slice::<_, u32>(&self.bytes).to_vec();
                     let scale_size = num_params; // size of f32 same as u32
                     let values_end = values.len() - scale_size;
 

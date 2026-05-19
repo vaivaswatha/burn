@@ -28,21 +28,59 @@ pub enum CiTestType {
     GcpWgpuRunner,
 }
 
+#[derive(strum::Display)]
+enum TestBackend {
+    #[strum(to_string = "cuda")]
+    Cuda,
+    #[strum(to_string = "metal")]
+    Metal,
+    #[strum(to_string = "vulkan")]
+    Vulkan,
+    #[strum(to_string = "wgpu")]
+    Wgpu,
+    #[allow(unused)]
+    #[strum(to_string = "rocm")]
+    Rocm,
+    #[strum(to_string = "flex")]
+    Flex,
+    #[strum(to_string = "ndarray")]
+    Ndarray,
+}
+
+fn set_burn_device(device: &str) {
+    // SAFETY: This is called in a single-threaded context within the xtask before spawning child processes.
+    unsafe {
+        std::env::set_var("BURN_DEVICE", device);
+    }
+}
+
 fn handle_backend_tests(
     mut args: TestCmdArgs,
-    backend: &str,
+    backend: TestBackend,
     env: Environment,
     context: Context,
 ) -> anyhow::Result<()> {
+    set_burn_device(&backend.to_string()); // default device
+
     args.target = Target::AllPackages;
     args.only.push("burn-backend-tests".to_string());
     args.no_default_features = true;
 
-    let mut features = vec![String::from(backend)];
+    let mut features = vec![backend.to_string()];
     if !matches!(context, Context::NoStd) {
         features.push("std".into())
     }
     args.features = Some(features);
+
+    if !matches!(backend, TestBackend::Ndarray | TestBackend::Flex) {
+        // Fusion enabled tests first
+        let mut fusion_args = args.clone();
+        if let Some(features) = fusion_args.features.as_mut() {
+            features.push("fusion".into());
+        }
+
+        base_commands::test::handle_command(fusion_args, env.clone(), context.clone())?;
+    }
 
     base_commands::test::handle_command(args, env, context)
 }
@@ -87,20 +125,35 @@ pub(crate) fn handle_command(
 ) -> anyhow::Result<()> {
     match context {
         Context::NoStd => {
+            // burn-flex's unit tests use `std::f32::consts` and bare `vec!`
+            // macros directly in test modules, so they only compile under std.
+            // The build step (`xtask build --no-std`) still validates that
+            // the crate itself compiles as no_std via `cargo build`, which
+            // does not pull in test modules.
+            let no_std_test_crates: Vec<&str> = NO_STD_CRATES
+                .iter()
+                .copied()
+                .filter(|&c| c != "burn-flex")
+                .collect();
             ["Default"].iter().try_for_each(|test_target| {
                 let mut test_args = vec!["--no-default-features"];
                 if *test_target != "Default" {
                     test_args.extend(vec!["--target", *test_target]);
                 }
                 helpers::custom_crates_tests(
-                    NO_STD_CRATES.to_vec(),
+                    no_std_test_crates.clone(),
                     handle_test_args(&test_args, args.release),
                     None,
                     None,
                     "no-std",
                 )
             })?;
-            handle_backend_tests(args.clone().try_into().unwrap(), "ndarray", env, context)?;
+            handle_backend_tests(
+                args.clone().try_into().unwrap(),
+                TestBackend::Ndarray,
+                env,
+                context,
+            )?;
 
             Ok(())
         }
@@ -123,6 +176,8 @@ pub(crate) fn handle_command(
                         "dqn-agent".to_string(),
                         // Requires wgpu runtime
                         "burn-cubecl-fusion".to_string(),
+                        // Backend tests are explicitly handled
+                        "burn-backend-tests".to_string(),
                     ]);
 
                     // Burn remote tests don't work on windows for now
@@ -131,6 +186,7 @@ pub(crate) fn handle_command(
                         args.exclude.extend(vec!["burn-remote".to_string()]);
                     };
 
+                    set_burn_device("flex"); // default device for base tests
                     base_commands::test::handle_command(
                         args.clone().try_into().unwrap(),
                         env.clone(),
@@ -139,7 +195,14 @@ pub(crate) fn handle_command(
 
                     handle_backend_tests(
                         args.clone().try_into().unwrap(),
-                        "ndarray",
+                        TestBackend::Ndarray,
+                        env.clone(),
+                        context.clone(),
+                    )?;
+
+                    handle_backend_tests(
+                        args.clone().try_into().unwrap(),
+                        TestBackend::Flex,
                         env,
                         context,
                     )?;
@@ -147,7 +210,7 @@ pub(crate) fn handle_command(
                 CiTestType::GithubMacRunner => {
                     handle_backend_tests(
                         args.clone().try_into().unwrap(),
-                        "metal",
+                        TestBackend::Metal,
                         env.clone(),
                         context.clone(),
                     )?;
@@ -165,29 +228,42 @@ pub(crate) fn handle_command(
                     )?;
                 }
                 CiTestType::GcpCudaRunner => {
-                    handle_backend_tests(args.clone().try_into().unwrap(), "cuda", env, context)?;
+                    handle_backend_tests(
+                        args.clone().try_into().unwrap(),
+                        TestBackend::Cuda,
+                        env,
+                        context,
+                    )?;
                 }
                 CiTestType::GcpVulkanRunner => {
-                    handle_backend_tests(args.clone().try_into().unwrap(), "vulkan", env, context)?;
+                    handle_backend_tests(
+                        args.clone().try_into().unwrap(),
+                        TestBackend::Vulkan,
+                        env,
+                        context,
+                    )?;
 
                     args.target = Target::AllPackages;
-                    let mut args_vulkan: TestCmdArgs = args.clone().try_into().unwrap();
-                    args_vulkan.features = Some(vec!["test-vulkan".into()]);
+                    let args_vulkan = args.clone().try_into().unwrap();
                     handle_wgpu_test("burn-core", &args_vulkan)?;
                     handle_wgpu_test("burn-optim", &args_vulkan)?;
                     handle_wgpu_test("burn-nn", &args_vulkan)?;
                     handle_wgpu_test("burn-vision", &args_vulkan)?;
                 }
                 CiTestType::GcpWgpuRunner => {
-                    handle_backend_tests(args.clone().try_into().unwrap(), "wgpu", env, context)?;
+                    handle_backend_tests(
+                        args.clone().try_into().unwrap(),
+                        TestBackend::Wgpu,
+                        env,
+                        context,
+                    )?;
                     // "burn-router" uses "burn-wgpu" for the tests.
                     args.target = Target::AllPackages;
-                    let mut args_wgpu = args.clone().try_into().unwrap();
+                    let args_wgpu = args.clone().try_into().unwrap();
                     handle_wgpu_test("burn-wgpu", &args_wgpu)?;
                     handle_wgpu_test("burn-router", &args_wgpu)?;
                     handle_wgpu_test("burn-cubecl-fusion", &args_wgpu)?;
 
-                    args_wgpu.features = Some(vec!["test-wgpu".into()]);
                     handle_wgpu_test("burn-core", &args_wgpu)?;
                     handle_wgpu_test("burn-optim", &args_wgpu)?;
                     handle_wgpu_test("burn-nn", &args_wgpu)?;
@@ -209,24 +285,31 @@ pub(crate) fn handle_command(
                     )?;
 
                     // burn-core
+                    set_burn_device("tch"); // test-tch
                     helpers::custom_crates_tests(
                         vec!["burn-core"],
                         handle_test_args(
-                            &["--features", "test-tch,record-item-custom-serde"],
+                            &["--features", "tch,record-item-custom-serde"],
                             args.release,
                         ),
                         None,
                         None,
-                        "std with features: test-tch,record-item-custom-serde",
+                        "std with features: tch,record-item-custom-serde",
                     )?;
 
+                    // burn-nn (pretrained and local tests)
+                    // If the "CI" environment variable is missing, we are running locally.
+                    // if std::env::var("CI").is_err() {
+                    //     nn_features.push_str(",test-local");
+                    // }
                     // burn-vision
+                    set_burn_device("flex");
                     helpers::custom_crates_tests(
                         vec!["burn-vision"],
-                        handle_test_args(&["--features", "test-cpu"], args.release),
+                        handle_test_args(&["--features", "flex", "loss"], args.release),
                         None,
                         None,
-                        "std cpu",
+                        "std cpu (flex)",
                     )?;
 
                     // burn-train vision (LPIPS, DISTS metrics)
@@ -249,16 +332,18 @@ pub(crate) fn handle_command(
                         None,
                         "std blas-accelerate",
                     )?;
+
+                    set_burn_device("metal");
                     helpers::custom_crates_tests(
                         vec!["burn-core"],
-                        handle_test_args(&["--features", "test-metal"], args.release),
+                        handle_test_args(&["--features", "metal"], args.release),
                         None,
                         None,
                         "std metal",
                     )?;
                     helpers::custom_crates_tests(
                         vec!["burn-vision"],
-                        handle_test_args(&["--features", "test-metal"], args.release),
+                        handle_test_args(&["--features", "metal"], args.release),
                         None,
                         None,
                         "std metal",
@@ -286,6 +371,7 @@ pub(crate) fn handle_command(
                         test: args.test.clone(),
                         force: args.force,
                         no_capture: args.no_capture,
+                        miri: args.miri,
                     },
                     env.clone(),
                     ctx.clone(),

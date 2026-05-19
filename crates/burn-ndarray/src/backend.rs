@@ -7,8 +7,9 @@ use crate::{
 use alloc::string::String;
 use burn_backend::quantization::{QuantLevel, QuantMode, QuantScheme, QuantStore, QuantValue};
 use burn_backend::tensor::{BoolTensor, FloatTensor, IntTensor, QuantizedTensor};
-use burn_backend::{Backend, DType, DeviceId, DeviceOps};
+use burn_backend::{Backend, BackendTypes, DType, DeviceId, DeviceOps};
 use burn_ir::{BackendIr, HandleKind, TensorHandle};
+use burn_std::BoolStore;
 use burn_std::stub::Mutex;
 use core::marker::PhantomData;
 use rand::SeedableRng;
@@ -36,10 +37,6 @@ impl burn_backend::Device for NdArrayDevice {
             index_id: 0,
         }
     }
-
-    fn device_count(_type_id: u16) -> usize {
-        1
-    }
 }
 
 /// Tensor backend that uses the [ndarray](ndarray) crate for executing tensor operations.
@@ -56,8 +53,8 @@ where
     _i: PhantomData<I>,
     _q: PhantomData<Q>,
 }
-
-impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> Backend for NdArray<E, I, Q>
+impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> BackendTypes
+    for NdArray<E, I, Q>
 where
     NdArrayTensor: From<SharedArray<E>>,
     NdArrayTensor: From<SharedArray<I>>,
@@ -74,7 +71,12 @@ where
     type BoolElem = bool;
 
     type QuantizedTensorPrimitive = NdArrayQTensor;
-
+}
+impl<E: FloatNdArrayElement, I: IntNdArrayElement, Q: QuantElement> Backend for NdArray<E, I, Q>
+where
+    NdArrayTensor: From<SharedArray<E>>,
+    NdArrayTensor: From<SharedArray<I>>,
+{
     fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
@@ -102,8 +104,8 @@ where
             | DType::U32
             | DType::U16
             | DType::U8
-            | DType::Bool => burn_backend::DTypeUsage::general(),
-            DType::F16 | DType::BF16 => burn_backend::DTypeUsageSet::empty(),
+            | DType::Bool(BoolStore::Native) => burn_backend::DTypeUsage::general(),
+            DType::F16 | DType::BF16 | DType::Bool(_) => burn_backend::DTypeUsageSet::empty(),
             DType::QFloat(scheme) => {
                 match scheme {
                     QuantScheme {
@@ -128,6 +130,10 @@ where
                 }
             }
         }
+    }
+
+    fn device_count(_: u16) -> usize {
+        1
     }
 }
 
@@ -204,7 +210,7 @@ mod tests {
         assert!(B::supports_dtype(&device, DType::U32));
         assert!(B::supports_dtype(&device, DType::U16));
         assert!(B::supports_dtype(&device, DType::U8));
-        assert!(B::supports_dtype(&device, DType::Bool));
+        assert!(B::supports_dtype(&device, DType::Bool(BoolStore::Native)));
         assert!(B::supports_dtype(
             &device,
             DType::QFloat(NdArrayQTensor::default_scheme())

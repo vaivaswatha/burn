@@ -4,10 +4,9 @@ use crate::metric::{
     state::{FormatOptions, NumericMetricState},
 };
 use burn_core::{
-    prelude::{Backend, Tensor},
+    prelude::{Device, Tensor},
     tensor::{ElementConversion, module::conv2d, ops::ConvOptions},
 };
-use core::marker::PhantomData;
 
 /// Input type for the [SsimMetric].
 ///
@@ -16,14 +15,14 @@ use core::marker::PhantomData;
 /// - `C`: Number of channels (1 for grayscale, 3 for RGB, etc.)
 /// - `H`: Height
 /// - `W`: Width
-pub struct SsimInput<B: Backend> {
+pub struct SsimInput {
     /// Model output (predictions/reconstructions) images with shape [N, C, H, W].
-    outputs: Tensor<B, 4>,
+    outputs: Tensor<4>,
     /// Ground truth images with shape [N, C, H, W].
-    targets: Tensor<B, 4>,
+    targets: Tensor<4>,
 }
 
-impl<B: Backend> SsimInput<B> {
+impl SsimInput {
     /// Creates a new SsimInput with the given outputs and targets.
     ///
     /// Inputs are expected to have the dimensions `[N, C, H, W]`
@@ -39,7 +38,7 @@ impl<B: Backend> SsimInput<B> {
     ///
     /// # Panics
     /// - If `outputs` and `targets` do not have the same shape.
-    pub fn new(outputs: Tensor<B, 4>, targets: Tensor<B, 4>) -> Self {
+    pub fn new(outputs: Tensor<4>, targets: Tensor<4>) -> Self {
         assert!(
             outputs.dims() == targets.dims(),
             "Shape mismatch: outputs {:?}, targets {:?}",
@@ -54,26 +53,26 @@ impl<B: Backend> SsimInput<B> {
 #[derive(Debug, Clone, Copy)]
 pub struct SsimMetricConfig {
     /// The range of the pixel values in images which can be computed as following:
-    /// `let data_range = max_pixel_val - min_pixel_val;`
+    /// `let pixel_range = max_pixel_val - min_pixel_val;`
     /// where `max_pixel_val` is the maximum possible pixel value and `min_pixel_val`
     /// is the minimum possible pixel value.
     ///
     /// - For normalized images in range [0, 1], it should be set to `1.0 - 0.0 = 1.0`
     /// - For normalized images in range [-1, 1], it should be set to `1.0 - (-1.0) = 2.0`
     /// - For 8-bit images in range [0, 255], it should be set to `255.0 - 0.0 = 255.0`
-    pub data_range: f64,
+    pub pixel_range: f32,
     /// A parameter of SSIM used to stabilize the luminance comparison.
     /// Default is 0.01.
-    pub k1: f64,
+    pub k1: f32,
     /// A parameter of SSIM used to stabilize the contrast comparison.
     /// Default is 0.03.
-    pub k2: f64,
+    pub k2: f32,
     /// The SSIM metric involves applying convolution to the input tensors using a Gaussian kernel.
-    /// This is the window/kernel size of the Gaussian kernel. Default is 11.
-    pub window_size: usize,
+    /// This is the kernel size of the Gaussian kernel. Default is 11.
+    pub kernel_size: usize,
     /// The SSIM metric involves applying convolution to the input tensors using a Gaussian kernel.
     /// This is the standard deviation of the Gaussian kernel. Default is 1.5.
-    pub sigma: f64,
+    pub sigma: f32,
 }
 
 impl SsimMetricConfig {
@@ -82,11 +81,11 @@ impl SsimMetricConfig {
     /// # Default parameters
     /// - k1: 0.01
     /// - k2: 0.03
-    /// - window_size: 11
+    /// - kernel_size: 11
     /// - sigma: 1.5
     ///
     /// # Panics
-    /// - If `data_range` is not positive.
+    /// - If `pixel_range` is not positive.
     ///
     /// # Example
     /// ```ignore
@@ -100,15 +99,15 @@ impl SsimMetricConfig {
     /// let config3 = SsimMetricConfig::new(1.0).with_k1_k2(0.015, 0.025);
     ///
     /// // Also set a custom value for window size
-    /// config3.with_window_size(13);
+    /// config3.with_kernel_size(13);
     /// ```
-    pub fn new(data_range: f64) -> Self {
-        assert!(data_range > 0.0, "data_range must be positive");
+    pub fn new(pixel_range: f32) -> Self {
+        assert!(pixel_range > 0.0, "pixel_range must be positive");
         Self {
-            data_range,
+            pixel_range: pixel_range,
             k1: 0.01,
             k2: 0.03,
-            window_size: 11,
+            kernel_size: 11,
             sigma: 1.5,
         }
     }
@@ -122,7 +121,7 @@ impl SsimMetricConfig {
     ///
     /// # Panics
     /// - If `k1` or `k2` is not positive.
-    pub fn with_k1_k2(mut self, k1: f64, k2: f64) -> Self {
+    pub fn with_k1_k2(mut self, k1: f32, k2: f32) -> Self {
         assert!(k1 > 0.0, "k1 must be positive");
         assert!(k2 > 0.0, "k2 must be positive");
         self.k1 = k1;
@@ -134,16 +133,16 @@ impl SsimMetricConfig {
     /// window size must be a positive odd number.
     ///
     /// # Default value
-    /// - window_size: 11
+    /// - kernel_size: 11
     ///
     /// # Panics
-    /// - If `window_size` is not a positive odd number.
-    pub fn with_window_size(mut self, window_size: usize) -> Self {
+    /// - If `kernel_size` is not a positive odd number.
+    pub fn with_kernel_size(mut self, kernel_size: usize) -> Self {
         assert!(
-            window_size > 0 && window_size % 2 == 1,
-            "window_size must be positive and an odd number"
+            kernel_size > 0 && kernel_size % 2 == 1,
+            "kernel_size must be positive and an odd number"
         );
-        self.window_size = window_size;
+        self.kernel_size = kernel_size;
         self
     }
 
@@ -154,7 +153,7 @@ impl SsimMetricConfig {
     ///
     /// # Panics
     /// - If `sigma` is not positive.
-    pub fn with_sigma(mut self, sigma: f64) -> Self {
+    pub fn with_sigma(mut self, sigma: f32) -> Self {
         assert!(sigma > 0.0, "sigma must be positive");
         self.sigma = sigma;
         self
@@ -178,17 +177,15 @@ impl SsimMetricConfig {
 ///   then vertical). This reduces the computational complexity from O(K^2) to O(2K) per pixel.
 /// - SSIM is computed for each image first, and then it is averaged across all the images in the batch.
 #[derive(Clone)]
-pub struct SsimMetric<B: Backend> {
+pub struct SsimMetric {
     name: MetricName,
     /// Internal state for numeric metric aggregation.
     state: NumericMetricState,
-    /// Marker for backend type.
-    _b: PhantomData<B>,
     /// Configuration for the metric.
     config: SsimMetricConfig,
 }
 
-impl<B: Backend> SsimMetric<B> {
+impl SsimMetric {
     /// Creates a new SSIM metric with the given configuration.
     ///
     /// # Note
@@ -200,17 +197,16 @@ impl<B: Backend> SsimMetric<B> {
     /// # Example
     /// ```ignore
     /// let ssim_config = SsimMetricConfig::new(1.0);
-    /// let ssim_metric = SsimMetric::<B>::new(ssim_config);
+    /// let ssim_metric = SsimMetric::new(ssim_config);
     /// ```
     pub fn new(config: SsimMetricConfig) -> Self {
         Self {
             name: MetricName::new(format!(
                 "SSIM (dr={}, w={}, σ={})",
-                config.data_range, config.window_size, config.sigma,
+                config.pixel_range, config.kernel_size, config.sigma,
             )),
             state: NumericMetricState::default(),
             config,
-            _b: PhantomData,
         }
     }
 
@@ -226,23 +222,23 @@ impl<B: Backend> SsimMetric<B> {
     /// The returned kernel will be reshaped by the `gaussian_conv_separable`
     /// associated function later.
     fn create_1d_gaussian_kernel(&self) -> Vec<f32> {
-        let size = self.config.window_size;
+        let size = self.config.kernel_size;
         let sigma = self.config.sigma;
-        let center = (size / 2) as f64;
+        let center = (size / 2) as f32;
 
         let mut kernel = vec![0.0f32; size];
-        let mut sum = 0.0f64;
+        let mut sum = 0.0f32;
 
         for (i, v) in kernel.iter_mut().enumerate() {
-            let x = i as f64 - center;
+            let x = i as f32 - center;
             let value = (-(x * x) / (2.0 * sigma * sigma)).exp();
-            *v = value as f32;
+            *v = value;
             sum += value;
         }
 
         // Normalize so values sum to 1
         for v in kernel.iter_mut() {
-            *v /= sum as f32;
+            *v /= sum;
         }
 
         kernel
@@ -256,20 +252,20 @@ impl<B: Backend> SsimMetric<B> {
     /// - `channels`: Number of channels for depthwise convolution.
     fn gaussian_conv_separable(
         &self,
-        input: Tensor<B, 4>,
+        input: Tensor<4>,
         kernel_1d: &[f32],
         channels: usize,
-        device: &B::Device,
-    ) -> Tensor<B, 4> {
-        let size = self.config.window_size;
+        device: &Device,
+    ) -> Tensor<4> {
+        let size = self.config.kernel_size;
         let padding = size / 2;
 
         // Create horizontal kernel: shape [C, 1, 1, K]
-        let horizontal_kernel = Tensor::<B, 1>::from_floats(kernel_1d, device)
+        let horizontal_kernel = Tensor::<1>::from_floats(kernel_1d, device)
             .reshape([1, 1, 1, size]) // [1, 1, 1, K]
             .repeat_dim(0, channels); // [C, 1, 1, K]
 
-        let vertical_kernel = Tensor::<B, 1>::from_floats(kernel_1d, device)
+        let vertical_kernel = Tensor::<1>::from_floats(kernel_1d, device)
             .reshape([1, 1, size, 1]) // [1, 1, K, 1]
             .repeat_dim(0, channels); // [C, 1, K, 1]
 
@@ -289,8 +285,8 @@ impl<B: Backend> SsimMetric<B> {
     }
 }
 
-impl<B: Backend> Metric for SsimMetric<B> {
-    type Input = SsimInput<B>;
+impl Metric for SsimMetric {
+    type Input = SsimInput;
 
     fn name(&self) -> MetricName {
         self.name.clone()
@@ -305,16 +301,16 @@ impl<B: Backend> Metric for SsimMetric<B> {
         let img_height = dims[2];
         let img_width = dims[3];
         assert!(
-            img_height >= self.config.window_size && img_width >= self.config.window_size,
-            "Image dimensions (H={}, W={}) must be >= window_size ({})",
+            img_height >= self.config.kernel_size && img_width >= self.config.kernel_size,
+            "Image dimensions (H={}, W={}) must be >= kernel_size ({})",
             img_height,
             img_width,
-            self.config.window_size
+            self.config.kernel_size
         );
 
         // Constants in SSIM formula used for numerical stability
-        let c1 = (self.config.k1 * self.config.data_range).powi(2);
-        let c2 = (self.config.k2 * self.config.data_range).powi(2);
+        let c1 = (self.config.k1 * self.config.pixel_range).powi(2);
+        let c2 = (self.config.k2 * self.config.pixel_range).powi(2);
 
         // Create 1D Gaussian kernel to apply separable convolutions twice (horizontally and vertically)
         let kernel_1d = self.create_1d_gaussian_kernel();
@@ -346,13 +342,13 @@ impl<B: Backend> Metric for SsimMetric<B> {
 
         // Compute SSIM:
         // SSIM(x, y) = (2μxμy + C1)(2σxy + C2) / (μx² + μy² + C1)(σx² + σy² + C2)
-        let numerator = (mu_x_mu_y.mul_scalar(2.0) + c1) * (sigma_xy.mul_scalar(2.0) + c2);
+        let numerator = (mu_x_mu_y.mul_scalar(2.0_f32) + c1) * (sigma_xy.mul_scalar(2.0_f32) + c2);
         let denominator = (square_of_mu_x + square_of_mu_y + c1) * (var_x + var_y + c2);
         let ssim_tensor = numerator / denominator;
 
         // Average SSIM across all dimensions to get a single scalar value
         let ssim_per_image = ssim_tensor.mean_dims(&[1, 2, 3]);
-        let avg_ssim = ssim_per_image.mean().into_scalar().elem::<f64>();
+        let avg_ssim = ssim_per_image.mean().into_scalar::<f64>();
 
         self.state.update(
             avg_ssim,
@@ -375,7 +371,7 @@ impl<B: Backend> Metric for SsimMetric<B> {
     }
 }
 
-impl<B: Backend> Numeric for SsimMetric<B> {
+impl Numeric for SsimMetric {
     fn value(&self) -> NumericEntry {
         self.state.current_value()
     }
@@ -389,12 +385,12 @@ impl<B: Backend> Numeric for SsimMetric<B> {
 #[allow(clippy::manual_range_contains)]
 mod tests {
     use super::*;
-    use crate::{TestBackend, metric::Numeric};
+    use crate::metric::Numeric;
     use burn_core::tensor::{Distribution, Shape, TensorData};
 
     fn test_config() -> SsimMetricConfig {
         SsimMetricConfig::new(1.0)
-            .with_window_size(3)
+            .with_kernel_size(3)
             .with_sigma(1.0)
     }
 
@@ -402,7 +398,7 @@ mod tests {
     fn test_ssim_perfect_similarity() {
         // When outputs exactly match targets, SSIM should be 1.0
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::from_data(
+        let outputs = Tensor::<4>::from_data(
             TensorData::from([[[
                 [0.1_f32, 0.2, 0.3, 0.4],
                 [0.5, 0.6, 0.7, 0.8],
@@ -413,7 +409,7 @@ mod tests {
         );
         let targets = outputs.clone();
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -431,10 +427,10 @@ mod tests {
         // With constant images: SSIM = (2*mu_x*mu_y + C1) / (mu_x^2 + mu_y^2 + C1)
         // For x=0, y=1 with C1=(0.01)^2=0.0001: SSIM ≈ 0.0001 / (1 + 0.00001) = 0.00009999
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::zeros([1, 1, 4, 4], &device);
-        let targets = Tensor::<TestBackend, 4>::ones([1, 1, 4, 4], &device);
+        let outputs = Tensor::<4>::zeros([1, 1, 4, 4], &device);
+        let targets = Tensor::<4>::ones([1, 1, 4, 4], &device);
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -450,10 +446,10 @@ mod tests {
     fn test_ssim_similar_images() {
         // Small perturbation should give high SSIM
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::full([1, 1, 4, 4], 0.5, &device);
-        let targets = Tensor::<TestBackend, 4>::full([1, 1, 4, 4], 0.51, &device);
+        let outputs = Tensor::<4>::full([1, 1, 4, 4], 0.5, &device);
+        let targets = Tensor::<4>::full([1, 1, 4, 4], 0.51, &device);
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -471,7 +467,7 @@ mod tests {
         // Image 1: identical (SSIM = 1.0)
         // Image 2: black vs white (SSIM ≈ 0)
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::from_data(
+        let outputs = Tensor::<4>::from_data(
             TensorData::from([
                 [[
                     [0.5_f32, 0.5, 0.5, 0.5],
@@ -488,7 +484,7 @@ mod tests {
             ]),
             &device,
         );
-        let targets = Tensor::<TestBackend, 4>::from_data(
+        let targets = Tensor::<4>::from_data(
             TensorData::from([
                 [[
                     [0.5_f32, 0.5, 0.5, 0.5],
@@ -506,7 +502,7 @@ mod tests {
             &device,
         );
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -523,7 +519,7 @@ mod tests {
     fn test_ssim_multichannel() {
         // Test with 3 channels (e.g., RGB)
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::from_data(
+        let outputs = Tensor::<4>::from_data(
             TensorData::from([[
                 [
                     [0.5_f32, 0.6, 0.7, 0.8],
@@ -548,7 +544,7 @@ mod tests {
         );
         let targets = outputs.clone();
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -565,7 +561,7 @@ mod tests {
         // SSIM(x, y) should equal SSIM(y, x)
         // Symmetry is one of the mathematical properties of SSIM
         let device = Default::default();
-        let img1 = Tensor::<TestBackend, 4>::from_data(
+        let img1 = Tensor::<4>::from_data(
             TensorData::from([[[
                 [0.1_f32, 0.2, 0.3, 0.4],
                 [0.5, 0.6, 0.7, 0.8],
@@ -574,7 +570,7 @@ mod tests {
             ]]]),
             &device,
         );
-        let img2 = Tensor::<TestBackend, 4>::from_data(
+        let img2 = Tensor::<4>::from_data(
             TensorData::from([[[
                 [0.2_f32, 0.3, 0.4, 0.5],
                 [0.6, 0.7, 0.8, 0.9],
@@ -586,12 +582,12 @@ mod tests {
 
         let config = test_config();
 
-        let mut metric1 = SsimMetric::<TestBackend>::new(config);
+        let mut metric1 = SsimMetric::new(config);
         let input1 = SsimInput::new(img1.clone(), img2.clone());
         let _entry = metric1.update(&input1, &MetricMetadata::fake());
         let ssim1 = metric1.value().current();
 
-        let mut metric2 = SsimMetric::<TestBackend>::new(config);
+        let mut metric2 = SsimMetric::new(config);
         let input2 = SsimInput::new(img2, img1);
         let _entry = metric2.update(&input2, &MetricMetadata::fake());
         let ssim2 = metric2.value().current();
@@ -610,10 +606,10 @@ mod tests {
         let device = Default::default();
         let shape = Shape::new([1, 1, 11, 11]);
         let distribution = Distribution::Uniform(0.0, 1.0);
-        let outputs = Tensor::<TestBackend, 4>::random(shape.clone(), distribution, &device);
-        let targets = Tensor::<TestBackend, 4>::random(shape, distribution, &device);
+        let outputs = Tensor::<4>::random(shape.clone(), distribution, &device);
+        let targets = Tensor::<4>::random(shape, distribution, &device);
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -628,10 +624,10 @@ mod tests {
     #[test]
     fn test_ssim_running_average() {
         let device = Default::default();
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
 
         // First update: identical images (SSIM = 1.0)
-        let outputs1 = Tensor::<TestBackend, 4>::from_data(
+        let outputs1 = Tensor::<4>::from_data(
             TensorData::from([[[
                 [0.5_f32, 0.6, 0.7, 0.8],
                 [0.4, 0.5, 0.6, 0.7],
@@ -652,8 +648,8 @@ mod tests {
         );
 
         // Second update: very different images (SSIM close to 0)
-        let outputs2 = Tensor::<TestBackend, 4>::zeros([1, 1, 4, 4], &device);
-        let targets2 = Tensor::<TestBackend, 4>::ones([1, 1, 4, 4], &device);
+        let outputs2 = Tensor::<4>::zeros([1, 1, 4, 4], &device);
+        let targets2 = Tensor::<4>::ones([1, 1, 4, 4], &device);
         let input2 = SsimInput::new(outputs2, targets2);
         let _entry = metric.update(&input2, &MetricMetadata::fake());
 
@@ -669,9 +665,9 @@ mod tests {
     #[test]
     fn test_ssim_clear() {
         let device = Default::default();
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
 
-        let outputs = Tensor::<TestBackend, 4>::from_data(
+        let outputs = Tensor::<4>::from_data(
             TensorData::from([[[
                 [0.5_f32, 0.6, 0.7, 0.8],
                 [0.4, 0.5, 0.6, 0.7],
@@ -700,28 +696,28 @@ mod tests {
     #[test]
     fn test_ssim_custom_name() {
         let config = SsimMetricConfig::new(1.0);
-        let metric = SsimMetric::<TestBackend>::new(config).with_name("CustomSSIM");
+        let metric = SsimMetric::new(config).with_name("CustomSSIM");
         assert_eq!(metric.name().to_string(), "CustomSSIM");
 
-        let metric = SsimMetric::<TestBackend>::new(test_config());
+        let metric = SsimMetric::new(test_config());
         assert_eq!(metric.name().to_string(), "SSIM (dr=1, w=3, σ=1)");
 
         let config = SsimMetricConfig::new(255.0);
-        let metric = SsimMetric::<TestBackend>::new(config);
+        let metric = SsimMetric::new(config);
         assert_eq!(metric.name().to_string(), "SSIM (dr=255, w=11, σ=1.5)");
     }
 
     #[test]
-    fn test_ssim_data_range_255() {
+    fn test_ssim_pixel_range_255() {
         // Test with 8-bit image range [0, 255]
         let device = Default::default();
         let shape = Shape::new([1, 1, 10, 10]);
         let distribution = Distribution::Uniform(0.0, 255.0);
-        let outputs = Tensor::<TestBackend, 4>::random(shape.clone(), distribution, &device);
+        let outputs = Tensor::<4>::random(shape.clone(), distribution, &device);
         let targets = outputs.clone();
 
-        let config = SsimMetricConfig::new(255.0).with_window_size(3);
-        let mut metric = SsimMetric::<TestBackend>::new(config);
+        let config = SsimMetricConfig::new(255.0).with_kernel_size(3);
+        let mut metric = SsimMetric::new(config);
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -738,10 +734,10 @@ mod tests {
         let device = Default::default();
         let shape = Shape::new([20, 3, 30, 30]);
         let distribution = Distribution::Uniform(0.0, 1.0);
-        let outputs = Tensor::<TestBackend, 4>::random(shape, distribution, &device);
+        let outputs = Tensor::<4>::random(shape, distribution, &device);
         let targets = outputs.clone();
 
-        let mut metric = SsimMetric::<TestBackend>::new(test_config());
+        let mut metric = SsimMetric::new(test_config());
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -754,16 +750,16 @@ mod tests {
     }
 
     #[test]
-    fn test_ssim_default_window_size() {
-        // Test with default window_size=11, need images >= 11x11
+    fn test_ssim_default_kernel_size() {
+        // Test with default kernel_size=11, need images >= 11x11
         let device = Default::default();
         let shape = Shape::new([1, 1, 1080, 1920]);
         let distribution = Distribution::Uniform(0.0, 1.0);
-        let outputs = Tensor::<TestBackend, 4>::random(shape, distribution, &device);
+        let outputs = Tensor::<4>::random(shape, distribution, &device);
         let targets = outputs.clone();
 
-        let config = SsimMetricConfig::new(1.0); // default window_size=11
-        let mut metric = SsimMetric::<TestBackend>::new(config);
+        let config = SsimMetricConfig::new(1.0); // default kernel_size=11
+        let mut metric = SsimMetric::new(config);
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
 
@@ -778,7 +774,7 @@ mod tests {
     #[test]
     fn test_ssim_attributes() {
         let config = SsimMetricConfig::new(1.0);
-        let metric = SsimMetric::<TestBackend>::new(config);
+        let metric = SsimMetric::new(config);
         let attrs = metric.attributes();
 
         match attrs {
@@ -794,22 +790,22 @@ mod tests {
     #[should_panic(expected = "Shape mismatch")]
     fn test_ssim_shape_mismatch() {
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::zeros([1, 1, 4, 4], &device);
-        let targets = Tensor::<TestBackend, 4>::zeros([1, 1, 5, 5], &device);
+        let outputs = Tensor::<4>::zeros([1, 1, 4, 4], &device);
+        let targets = Tensor::<4>::zeros([1, 1, 5, 5], &device);
 
         let _ = SsimInput::new(outputs, targets);
     }
 
     #[test]
-    #[should_panic(expected = "Image dimensions (H=4, W=4) must be >= window_size (11)")]
+    #[should_panic(expected = "Image dimensions (H=4, W=4) must be >= kernel_size (11)")]
     fn test_ssim_image_too_small() {
         let device = Default::default();
-        let outputs = Tensor::<TestBackend, 4>::zeros([1, 1, 4, 4], &device);
+        let outputs = Tensor::<4>::zeros([1, 1, 4, 4], &device);
         let targets = outputs.clone();
 
-        // Default window_size=11, but image is only 4x4
+        // Default kernel_size=11, but image is only 4x4
         let config = SsimMetricConfig::new(1.0);
-        let mut metric = SsimMetric::<TestBackend>::new(config);
+        let mut metric = SsimMetric::new(config);
         let input = SsimInput::new(outputs, targets);
         let _entry = metric.update(&input, &MetricMetadata::fake());
     }
@@ -826,14 +822,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "data_range must be positive")]
-    fn test_ssim_negative_data_range() {
+    #[should_panic(expected = "pixel_range must be positive")]
+    fn test_ssim_negative_pixel_range() {
         let _ = SsimMetricConfig::new(-1.0);
     }
 
     #[test]
-    #[should_panic(expected = "data_range must be positive")]
-    fn test_ssim_zero_data_range() {
+    #[should_panic(expected = "pixel_range must be positive")]
+    fn test_ssim_zero_pixel_range() {
         let _ = SsimMetricConfig::new(0.0);
     }
 
@@ -850,15 +846,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "window_size must be positive and an odd number")]
-    fn test_ssim_even_window_size() {
-        let _ = SsimMetricConfig::new(1.0).with_window_size(10);
+    #[should_panic(expected = "kernel_size must be positive and an odd number")]
+    fn test_ssim_even_kernel_size() {
+        let _ = SsimMetricConfig::new(1.0).with_kernel_size(10);
     }
 
     #[test]
-    #[should_panic(expected = "window_size must be positive and an odd number")]
-    fn test_ssim_zero_window_size() {
-        let _ = SsimMetricConfig::new(1.0).with_window_size(0);
+    #[should_panic(expected = "kernel_size must be positive and an odd number")]
+    fn test_ssim_zero_kernel_size() {
+        let _ = SsimMetricConfig::new(1.0).with_kernel_size(0);
     }
 
     #[test]

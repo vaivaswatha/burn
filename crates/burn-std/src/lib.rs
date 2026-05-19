@@ -7,6 +7,9 @@
 //! This library contains core types and utilities shared across Burn, including shapes, indexing,
 //! and data types.
 
+#[macro_use]
+extern crate derive_new;
+
 extern crate alloc;
 
 /// Id module contains types for unique identifiers.
@@ -16,6 +19,28 @@ pub mod id;
 pub mod tensor;
 pub use tensor::*;
 
+/// Tensor data representation and helpers.
+pub mod data;
+pub use data::*;
+
+/// Random value distributions.
+pub mod distribution;
+pub use distribution::*;
+
+/// Traits for tensor element types and conversions.
+pub mod element;
+pub use element::*;
+
+mod device_settings;
+pub use device_settings::*;
+
+/// Configuration types for tensor operations (conv, pool, interpolate, pad, etc).
+pub mod ops;
+pub use ops::*;
+
+/// Burn runtime configurations.
+pub mod config;
+
 /// Common Errors.
 pub use cubecl_zspace::errors::{self, *};
 
@@ -24,7 +49,10 @@ pub use cubecl_zspace::errors::{self, *};
 pub mod network;
 
 // Re-exported types
+#[cfg(feature = "cubecl")]
+pub use cubecl::server::CommunicationId;
 pub use cubecl_common::bytes::*;
+pub use cubecl_common::device_handle::DeviceHandle;
 pub use cubecl_common::*;
 pub use half::{bf16, f16};
 
@@ -55,7 +83,11 @@ mod cube {
                 DType::U32 => ElemType::UInt(UIntKind::U32),
                 DType::U16 => ElemType::UInt(UIntKind::U16),
                 DType::U8 => ElemType::UInt(UIntKind::U8),
-                DType::Bool => ElemType::Bool,
+                DType::Bool(store) => match store {
+                    crate::BoolStore::Native => ElemType::Bool,
+                    crate::BoolStore::U8 => ElemType::UInt(UIntKind::U8),
+                    crate::BoolStore::U32 => ElemType::UInt(UIntKind::U32),
+                },
                 DType::QFloat(scheme) => match scheme.store {
                     QuantStore::Native => match scheme.value {
                         QuantValue::Q8F | QuantValue::Q8S => Self::Int(IntKind::I8),

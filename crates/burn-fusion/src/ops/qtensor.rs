@@ -1,7 +1,8 @@
 use std::marker::PhantomData;
 
 use burn_backend::{
-    DType, Element, ExecutionError, QTensorPrimitive, Shape, Slice, TensorData, TensorPrimitive,
+    DType, Element, ExecutionError, FloatDType, QTensorPrimitive, Shape, Slice, TensorData,
+    TensorPrimitive,
     ops::QTensorOps,
     quantization::{QuantPropagation, QuantScheme, QuantizationParametersPrimitive},
     tensor::{Device, FloatTensor, IntTensor, QuantizedTensor},
@@ -13,7 +14,9 @@ use burn_ir::{
 };
 
 use crate::{
-    Fusion, FusionBackend, get_client,
+    Fusion, FusionBackend,
+    client::GlobalFusionClient,
+    get_client,
     stream::{OperationStreams, execution::Operation},
 };
 
@@ -79,7 +82,7 @@ impl<B: FusionBackend> QTensorOps<Self> for Fusion<B> {
             .output()
     }
 
-    fn dequantize(tensor: QuantizedTensor<Self>) -> FloatTensor<Self> {
+    fn dequantize(tensor: QuantizedTensor<Self>, dtype: FloatDType) -> FloatTensor<Self> {
         #[derive(new, Debug)]
         struct DequantizeOp<B: FusionBackend> {
             desc: DequantizeOpIr,
@@ -90,7 +93,7 @@ impl<B: FusionBackend> QTensorOps<Self> for Fusion<B> {
             fn execute(&self, handles: &mut HandleContainer<B::Handle>) {
                 let tensor = handles.get_quantized_tensor::<B>(&self.desc.input);
 
-                let output = B::dequantize(tensor);
+                let output = B::dequantize(tensor, self.desc.out.dtype.into());
                 handles.register_float_tensor::<B>(&self.desc.out.id, output);
             }
         }
@@ -98,7 +101,7 @@ impl<B: FusionBackend> QTensorOps<Self> for Fusion<B> {
         let streams = OperationStreams::with_inputs([&tensor]);
 
         let client = tensor.client.clone();
-        let dtype = B::FloatElem::dtype();
+        let dtype = dtype.into();
         let desc = DequantizeOpIr::create(tensor.into_ir(), dtype, || client.create_empty_handle());
 
         client
@@ -114,19 +117,27 @@ impl<B: FusionBackend> QTensorOps<Self> for Fusion<B> {
         tensor.client.device().clone()
     }
 
-    fn q_to_device(tensor: QuantizedTensor<Self>, device: &Device<Self>) -> QuantizedTensor<Self> {
-        let device_original: &B::Device = tensor.client.device();
-        let device_target: B::Device = device.clone();
+    fn q_to_device(
+        tensor: QuantizedTensor<Self>,
+        device_dst: &Device<Self>,
+    ) -> QuantizedTensor<Self> {
+        let device_src: &B::Device = tensor.client.device();
+        let device_dst: B::Device = device_dst.clone();
 
-        if device_original == &device_target {
+        if device_src == &device_dst {
             return tensor;
         }
 
         let id = tensor.stream;
-        let client_target = get_client::<B>(&device_target);
-        let client_original = tensor.client.clone();
+        let client_dst = get_client::<B>(&device_dst);
+        let client_src = tensor.client.clone();
 
-        client_original.change_client_quantized::<B>(tensor.into_ir(), client_target, id)
+        GlobalFusionClient::change_client_quantized::<B>(
+            tensor.into_ir(),
+            client_src,
+            client_dst,
+            id,
+        )
     }
 
     fn q_reshape(tensor: QuantizedTensor<Self>, shape: Shape) -> QuantizedTensor<Self> {

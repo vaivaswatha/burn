@@ -4,6 +4,7 @@ use burn_backend::backend::ExecutionError;
 use burn_backend::ops::GridSampleOptions;
 use burn_backend::tensor::FloatTensor;
 use burn_backend::{TensorMetadata, element::cast::ToElement};
+use burn_std::{BoolDType, IntDType};
 
 // Current crate
 use super::{
@@ -13,7 +14,7 @@ use super::{
 use crate::{
     NdArray, cast_to_dtype, cat_with_dtype, execute_with_int_dtype, tensor::NdArrayTensor,
 };
-use crate::{NdArrayDevice, SEED, slice};
+use crate::{NdArrayDevice, SEED, execute_with_float_out_dtype, execute_with_int_out_dtype, slice};
 use crate::{
     SharedArray,
     element::{ExpElement, FloatNdArrayElement, IntNdArrayElement, QuantElement},
@@ -23,7 +24,7 @@ use crate::{execute_with_float_dtype, ops::grid_sample::grid_sample_2d};
 // Workspace crates
 use crate::rand::get_seeded_rng;
 use burn_backend::{Distribution, FloatDType, Scalar};
-use burn_backend::{ElementConversion, Shape, TensorData, backend::Backend, ops::FloatTensorOps};
+use burn_backend::{ElementConversion, Shape, TensorData, ops::FloatTensorOps};
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -61,13 +62,19 @@ where
         shape: Shape,
         distribution: Distribution,
         device: &NdArrayDevice,
+        dtype: FloatDType,
     ) -> FloatTensor<Self> {
         let mut seed = SEED.lock().unwrap();
         let mut rng = seed.take().unwrap_or_else(get_seeded_rng);
-        let tensor = Self::float_from_data(
-            TensorData::random::<E, _, _>(shape, distribution, &mut rng),
-            device,
+        let tensor = execute_with_float_out_dtype!(
+            dtype,
+            E,
+            Self::float_from_data(
+                TensorData::random::<E, _, _>(shape, distribution, &mut rng),
+                device,
+            )
         );
+
         *seed = Some(rng);
         tensor
     }
@@ -84,11 +91,7 @@ where
         tensor
     }
 
-    fn float_empty(
-        shape: Shape,
-        device: &<NdArray<E> as Backend>::Device,
-        dtype: FloatDType,
-    ) -> FloatTensor<Self> {
+    fn float_empty(shape: Shape, device: &NdArrayDevice, dtype: FloatDType) -> FloatTensor<Self> {
         Self::float_zeros(shape, device, dtype)
     }
 
@@ -205,6 +208,35 @@ where
         )
     }
 
+    fn float_scatter_nd(
+        data: FloatTensor<Self>,
+        indices: NdArrayTensor,
+        values: FloatTensor<Self>,
+        reduction: burn_backend::tensor::IndexingUpdateOp,
+    ) -> FloatTensor<Self> {
+        execute_with_int_dtype!(
+            indices,
+            IntElem,
+            |idx_array: SharedArray<IntElem>| -> NdArrayTensor {
+                execute_with_float_dtype!((data, values), |data, values| NdArrayOps::scatter_nd(
+                    data, idx_array, values, reduction
+                ))
+            }
+        )
+    }
+
+    fn float_gather_nd(data: FloatTensor<Self>, indices: NdArrayTensor) -> FloatTensor<Self> {
+        execute_with_int_dtype!(
+            indices,
+            IntElem,
+            |idx_array: SharedArray<IntElem>| -> NdArrayTensor {
+                execute_with_float_dtype!(data, FloatElem, |array: SharedArray<FloatElem>| {
+                    NdArrayOps::gather_nd(array, idx_array)
+                })
+            }
+        )
+    }
+
     fn float_select(
         tensor: FloatTensor<Self>,
         dim: usize,
@@ -272,55 +304,95 @@ where
         })
     }
 
-    fn float_equal(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> NdArrayTensor {
+    fn float_equal(
+        lhs: FloatTensor<Self>,
+        rhs: FloatTensor<Self>,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!((lhs, rhs), |lhs, rhs| { NdArrayMathOps::equal(lhs, rhs) })
     }
 
-    fn float_equal_elem(lhs: FloatTensor<Self>, rhs: Scalar) -> NdArrayTensor {
+    fn float_equal_elem(
+        lhs: FloatTensor<Self>,
+        rhs: Scalar,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!(lhs, FloatElem, |array: SharedArray<FloatElem>| {
             NdArrayMathOps::equal_elem(array, rhs.elem())
         })
     }
 
-    fn float_greater(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> NdArrayTensor {
+    fn float_greater(
+        lhs: FloatTensor<Self>,
+        rhs: FloatTensor<Self>,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!((lhs, rhs), |lhs, rhs| { NdArrayMathOps::greater(lhs, rhs) })
     }
 
-    fn float_greater_elem(lhs: FloatTensor<Self>, rhs: Scalar) -> NdArrayTensor {
+    fn float_greater_elem(
+        lhs: FloatTensor<Self>,
+        rhs: Scalar,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!(lhs, FloatElem, |array: SharedArray<FloatElem>| {
             NdArrayMathOps::greater_elem(array, rhs.elem())
         })
     }
 
-    fn float_greater_equal(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> NdArrayTensor {
+    fn float_greater_equal(
+        lhs: FloatTensor<Self>,
+        rhs: FloatTensor<Self>,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!((lhs, rhs), |lhs, rhs| {
             NdArrayMathOps::greater_equal(lhs, rhs)
         })
     }
 
-    fn float_greater_equal_elem(lhs: FloatTensor<Self>, rhs: Scalar) -> NdArrayTensor {
+    fn float_greater_equal_elem(
+        lhs: FloatTensor<Self>,
+        rhs: Scalar,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!(lhs, FloatElem, |array: SharedArray<FloatElem>| {
             NdArrayMathOps::greater_equal_elem(array, rhs.elem())
         })
     }
 
-    fn float_lower(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> NdArrayTensor {
+    fn float_lower(
+        lhs: FloatTensor<Self>,
+        rhs: FloatTensor<Self>,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!((lhs, rhs), |lhs, rhs| { NdArrayMathOps::lower(lhs, rhs) })
     }
 
-    fn float_lower_elem(lhs: FloatTensor<Self>, rhs: Scalar) -> NdArrayTensor {
+    fn float_lower_elem(
+        lhs: FloatTensor<Self>,
+        rhs: Scalar,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!(lhs, FloatElem, |array: SharedArray<FloatElem>| {
             NdArrayMathOps::lower_elem(array, rhs.elem())
         })
     }
 
-    fn float_lower_equal(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> NdArrayTensor {
+    fn float_lower_equal(
+        lhs: FloatTensor<Self>,
+        rhs: FloatTensor<Self>,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!((lhs, rhs), |lhs, rhs| {
             NdArrayMathOps::lower_equal(lhs, rhs)
         })
     }
 
-    fn float_lower_equal_elem(lhs: FloatTensor<Self>, rhs: Scalar) -> NdArrayTensor {
+    fn float_lower_equal_elem(
+        lhs: FloatTensor<Self>,
+        rhs: Scalar,
+        _out_dtype: BoolDType,
+    ) -> NdArrayTensor {
         execute_with_float_dtype!(lhs, FloatElem, |array: SharedArray<FloatElem>| {
             NdArrayMathOps::lower_equal_elem(array, rhs.elem())
         })
@@ -380,17 +452,30 @@ where
         })
     }
 
-    fn float_argmax(tensor: FloatTensor<Self>, dim: usize) -> NdArrayTensor {
+    fn float_argmax(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> NdArrayTensor {
         // Use view() for zero-copy on borrowed storage
-        execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
-            NdArrayMathOps::argmax_view::<I>(array.view(), dim)
+        execute_with_int_out_dtype!(out_dtype, I, {
+            execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
+                NdArrayMathOps::argmax_view::<I>(array.view(), dim)
+            })
         })
     }
 
-    fn float_argmin(tensor: FloatTensor<Self>, dim: usize) -> NdArrayTensor {
+    fn float_argtopk(
+        _tensor: FloatTensor<Self>,
+        _dim: usize,
+        _k: usize,
+        _out_dtype: IntDType,
+    ) -> NdArrayTensor {
+        unimplemented!("float_argtopk not implemented for ndarray")
+    }
+
+    fn float_argmin(tensor: FloatTensor<Self>, dim: usize, out_dtype: IntDType) -> NdArrayTensor {
         // Use view() for zero-copy on borrowed storage
-        execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
-            NdArrayMathOps::argmin_view::<I>(array.view(), dim)
+        execute_with_int_out_dtype!(out_dtype, I, {
+            execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
+                NdArrayMathOps::argmin_view::<I>(array.view(), dim)
+            })
         })
     }
 
@@ -623,9 +708,11 @@ where
         })
     }
 
-    fn float_into_int(tensor: FloatTensor<Self>) -> NdArrayTensor {
-        execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
-            array.mapv(|a: FloatElem| a.elem::<I>()).into_shared()
+    fn float_into_int(tensor: FloatTensor<Self>, out_dtype: IntDType) -> NdArrayTensor {
+        execute_with_int_out_dtype!(out_dtype, I, {
+            execute_with_float_dtype!(tensor, FloatElem, |array: SharedArray<FloatElem>| {
+                array.mapv(|a: FloatElem| a.elem::<I>()).into_shared()
+            })
         })
     }
 

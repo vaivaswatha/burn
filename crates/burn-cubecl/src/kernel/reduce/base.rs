@@ -7,11 +7,16 @@ use crate::{
 };
 use burn_backend::{DType, TensorMetadata};
 use burn_std::Metadata;
-use cubecl::{AutotuneKey, client::ComputeClient, features::TypeUsage, ir::StorageType};
+use cubecl::{
+    AutotuneKey,
+    client::ComputeClient,
+    features::AtomicUsage,
+    ir::{StorageType, Type},
+};
 use cubek::reduce::{
     ReduceDtypes, ReduceError, ReduceStrategy,
     components::instructions::ReduceOperationConfig,
-    launch::{LineSizeStrategy, RoutineStrategy},
+    launch::{RoutineStrategy, VectorizationStrategy},
     routines::{BlueprintStrategy, unit::UnitStrategy},
     shared_sum,
 };
@@ -31,8 +36,8 @@ pub struct SumAutotuneKey {
 fn supports_atomic_add<R: CubeRuntime>(client: &ComputeClient<R>, dtype: DType) -> bool {
     client
         .properties()
-        .type_usage(StorageType::Atomic(dtype.into()))
-        .contains(TypeUsage::AtomicAdd)
+        .atomic_type_usage(Type::new(StorageType::Atomic(dtype.into())))
+        .contains(AtomicUsage::Add)
 }
 
 /// [Sum](sum) with fallback when `client` doesn't support atomic add for the type `E`.
@@ -65,12 +70,14 @@ pub fn sum<Run: CubeRuntime>(
     match strategy {
         SumStrategy::OneShot(cube_count) => {
             let output = zeros_client(client.clone(), device, [1].into(), tensor.dtype);
+            let dtype = tensor.dtype;
+
             shared_sum::<Run>(
                 &client,
-                tensor.as_handle_ref(),
-                output.as_handle_ref(),
+                tensor.binding(),
+                output.clone().binding(),
                 cube_count,
-                tensor.dtype.into(),
+                dtype.into(),
             )?;
 
             Ok(output)
@@ -151,15 +158,22 @@ pub fn reduce_dim<Run: CubeRuntime>(
     debug_assert!(
         !matches!(
             config,
-            ReduceOperationConfig::ArgMax | ReduceOperationConfig::ArgMin
+            ReduceOperationConfig::ArgMax
+                | ReduceOperationConfig::ArgMin
+                | ReduceOperationConfig::ArgTopK(_)
         ) || output_dtype.is_some(),
-        "The `output_dtype` has to be `Some` only when the `config` is `ArgMax` or `ArgMin`.
+        "The `output_dtype` has to be `Some` only when the `config` is `ArgMax`, `ArgMin` or `ArgTopK`.
         "
     );
 
+    let accumulator_len = match config {
+        ReduceOperationConfig::ArgTopK(k) => k,
+        ReduceOperationConfig::TopK(k) => k,
+        _ => 1,
+    };
     let dtypes = config.precision(input.dtype.into(), output_dtype.map(Into::into));
     let client = input.client.clone();
-    let output = init_reduce_output::<Run>(&input, dim, &dtypes).ok_or(
+    let output = init_reduce_output::<Run>(&input, dim, &dtypes, accumulator_len).ok_or(
         cubek::reduce::ReduceError::InvalidAxis {
             axis: dim,
             rank: input.meta.num_dims(),
@@ -169,12 +183,12 @@ pub fn reduce_dim<Run: CubeRuntime>(
     let result = match strategy {
         KernelReduceStrategy::Unspecified => cubek::reduce::reduce::<Run>(
             &client,
-            input.as_handle_ref(),
-            output.as_handle_ref(),
+            input.binding(),
+            output.clone().binding(),
             dim,
             ReduceStrategy {
                 routine: RoutineStrategy::Unit(BlueprintStrategy::Inferred(UnitStrategy)),
-                line_size: LineSizeStrategy {
+                vectorization: VectorizationStrategy {
                     parallel_output_vectorization: false,
                 },
             },
@@ -183,8 +197,8 @@ pub fn reduce_dim<Run: CubeRuntime>(
         ),
         KernelReduceStrategy::Specific(strategy) => cubek::reduce::reduce::<Run>(
             &client,
-            input.as_handle_ref(),
-            output.as_handle_ref(),
+            input.binding(),
+            output.clone().binding(),
             dim,
             strategy,
             config,
@@ -205,10 +219,11 @@ pub fn init_reduce_output<Run: CubeRuntime>(
     input: &CubeTensor<Run>,
     dim: usize,
     dtypes: &ReduceDtypes,
+    accumulator_len: usize,
 ) -> Option<CubeTensor<Run>> {
     (dim < input.meta.num_dims()).then(|| {
         let mut shape_out = input.shape();
-        shape_out[dim] = 1;
+        shape_out[dim] = accumulator_len;
         empty_device_contiguous_dtype(
             input.client.clone(),
             input.device.clone(),

@@ -2,13 +2,11 @@ use burn_backend::ops::ConvOptions;
 use burn_std::Shape;
 use cubek::{
     convolution::{
-        AcceleratedTileKind, ConvolutionArgs, ReadingStrategy, Strategy, backward_weight,
-        components::ConvSetupError,
+        AcceleratedTileKind, ConvAlgorithm, ConvolutionArgs, ConvolutionInputs, Strategy,
+        components::ConvSetupError, launch_ref,
     },
-    matmul::{
-        definition::{MatmulElems, MatmulGlobalElems},
-        launch::MatmulInputHandleRef,
-    },
+    matmul::definition::{MatmulElems, MatmulGlobalElems},
+    std::InputBinding,
 };
 
 use crate::{CubeRuntime, ops::numeric::empty_device_dtype, tensor::CubeTensor};
@@ -20,20 +18,18 @@ pub(crate) fn wgrad_gemm_simple_sync<R: CubeRuntime, const N: usize>(
     options: ConvOptions<N>,
     tile_kind: AcceleratedTileKind,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
-    let read_strategy = match tile_kind {
-        AcceleratedTileKind::Cmma => ReadingStrategy::Cyclic,
-        AcceleratedTileKind::Mma => ReadingStrategy::Strided,
-    };
-    launch_backwards_weight::<R, N>(
-        &Strategy::Simple {
-            read_strategy,
+    let strategy = match tile_kind {
+        AcceleratedTileKind::Cmma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleSyncCyclic,
             tile_kind,
         },
-        input,
-        out_grad,
-        weight_shape,
-        options,
-    )
+        AcceleratedTileKind::Mma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleSyncStrided,
+            tile_kind,
+        },
+    };
+
+    launch_backwards_weight::<R, N>(&strategy, input, out_grad, weight_shape, options)
 }
 
 pub(crate) fn wgrad_gemm_simple_async<R: CubeRuntime, const N: usize>(
@@ -43,20 +39,18 @@ pub(crate) fn wgrad_gemm_simple_async<R: CubeRuntime, const N: usize>(
     options: ConvOptions<N>,
     tile_kind: AcceleratedTileKind,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
-    let read_strategy = match tile_kind {
-        AcceleratedTileKind::Cmma => ReadingStrategy::AsyncCyclic,
-        AcceleratedTileKind::Mma => ReadingStrategy::AsyncStrided,
-    };
-    launch_backwards_weight::<R, N>(
-        &Strategy::Simple {
-            read_strategy,
+    let strategy = match tile_kind {
+        AcceleratedTileKind::Cmma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleAsyncCyclic,
             tile_kind,
         },
-        input,
-        out_grad,
-        weight_shape,
-        options,
-    )
+        AcceleratedTileKind::Mma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleAsyncStrided,
+            tile_kind,
+        },
+    };
+
+    launch_backwards_weight::<R, N>(&strategy, input, out_grad, weight_shape, options)
 }
 
 pub(crate) fn wgrad_gemm_simple_tma<R: CubeRuntime, const N: usize>(
@@ -67,8 +61,8 @@ pub(crate) fn wgrad_gemm_simple_tma<R: CubeRuntime, const N: usize>(
     tile_kind: AcceleratedTileKind,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
     launch_backwards_weight::<R, N>(
-        &Strategy::Simple {
-            read_strategy: ReadingStrategy::Tma,
+        &Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleAsyncTma,
             tile_kind,
         },
         input,
@@ -111,15 +105,19 @@ pub fn launch_backwards_weight<R: CubeRuntime, const N: usize>(
         rhs: out_grad.dtype.into(),
         out: out_dtype.into(),
     });
-    let input = MatmulInputHandleRef::new(input.as_handle_ref(), input.dtype.into());
-    let out_grad = MatmulInputHandleRef::new(out_grad.as_handle_ref(), out_grad.dtype.into());
+    let input_dtype = input.dtype;
+    let out_grad_dtype = out_grad.dtype;
+    let input = InputBinding::new(input.binding(), input_dtype.into());
+    let out_grad = InputBinding::new(out_grad.binding(), out_grad_dtype.into());
 
-    backward_weight::launch_ref::<R, N>(
+    launch_ref::<R, N>(
         strategy,
         &client,
-        &input,
-        &out_grad,
-        &weight_grad.as_handle_ref(),
+        ConvolutionInputs::BackwardWeight {
+            input,
+            out_grad,
+            weight_grad: weight_grad.clone().binding(),
+        },
         ConvolutionArgs {
             stride: options.stride,
             padding: options.padding,

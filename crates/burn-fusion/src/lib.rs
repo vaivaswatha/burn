@@ -18,10 +18,17 @@ pub mod stream;
 pub(crate) mod search;
 
 mod backend;
+mod op;
 mod ops;
 mod server;
 mod tensor;
 
+/// Test-only introspection into fusion runtime behavior — see
+/// [`inspect::FusionInspector`].
+#[cfg(feature = "test-util")]
+pub mod inspect;
+
+pub use op::UnfusedOp;
 pub(crate) use server::*;
 
 pub use backend::*;

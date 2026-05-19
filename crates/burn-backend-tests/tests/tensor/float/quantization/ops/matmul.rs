@@ -6,8 +6,8 @@ use burn_tensor::Tolerance;
 #[test]
 #[ignore]
 fn test_matmul_vectors() {
-    let tensor_1 = QTensor::<TestBackend, 2>::int8([[1.0, 2.0, 3.0, 6.35]]);
-    let tensor_2 = QTensor::<TestBackend, 2>::int8([[12.7], [4.0], [5.0], [1.0]]);
+    let tensor_1 = QTensor::<2>::int8([[1.0, 2.0, 3.0, 6.35]]);
+    let tensor_2 = QTensor::<2>::int8([[12.7], [4.0], [5.0], [1.0]]);
 
     let tensor_3 = tensor_1.matmul(tensor_2);
 
@@ -20,8 +20,8 @@ fn test_matmul_vectors() {
 #[test]
 #[ignore]
 fn test_matmul_2d() {
-    let tensor_1 = QTensor::<TestBackend, 2>::int8([[1.0, 6.35], [2.0, 3.0], [1.0, 3.0]]);
-    let tensor_2 = QTensor::<TestBackend, 2>::int8([[4.0, 8.0, 12.7], [2.0, 3.0, 6.0]]);
+    let tensor_1 = QTensor::<2>::int8([[1.0, 6.35], [2.0, 3.0], [1.0, 3.0]]);
+    let tensor_2 = QTensor::<2>::int8([[4.0, 8.0, 12.7], [2.0, 3.0, 6.0]]);
     let tensor_3 = tensor_1.matmul(tensor_2);
 
     let expected = TensorData::from([[16.7, 27.05, 50.8], [14., 25., 43.4], [10., 17., 30.7]]);
@@ -32,12 +32,12 @@ fn test_matmul_2d() {
 
 #[test]
 fn test_matmul_2d_aligned() {
-    let tensor_1 = QTensor::<TestBackend, 2>::int8([
+    let tensor_1 = QTensor::<2>::int8([
         [1.0, 2.0, 3.0, 4.0],
         [5.0, 6.0, 7.0, 8.0],
         [9.0, 10.0, 11.0, 12.0],
     ]);
-    let tensor_2 = QTensor::<TestBackend, 2>::int8([
+    let tensor_2 = QTensor::<2>::int8([
         [2.0, 0.0, 1.0, 0.0],
         [1.0, 2.0, 0.0, 0.0],
         [0.0, 1.0, 2.0, 0.0],
@@ -57,12 +57,12 @@ fn test_matmul_2d_aligned() {
 
 #[test]
 fn test_matmul_2d_aligned_fused() {
-    let tensor_1 = QTensor::<TestBackend, 2>::int8([
+    let tensor_1 = QTensor::<2>::int8([
         [1.0, 2.0, 3.0, 4.0],
         [5.0, 6.0, 7.0, 8.0],
         [9.0, 10.0, 11.0, 12.0],
     ]);
-    let tensor_2 = QTensor::<TestBackend, 2>::int8([
+    let tensor_2 = QTensor::<2>::int8([
         [2.0, 0.0, 1.0, 0.0],
         [1.0, 2.0, 0.0, 0.0],
         [0.0, 1.0, 2.0, 0.0],
@@ -84,8 +84,8 @@ fn test_matmul_2d_aligned_fused() {
 #[test]
 #[ignore]
 fn test_matmul_3d() {
-    let tensor_1 = QTensor::<TestBackend, 3>::int8([[[1.0, 6.35], [2.0, 3.0]]]);
-    let tensor_2 = QTensor::<TestBackend, 3>::int8([[[12.7, 4.0], [2.0, 3.0]]]);
+    let tensor_1 = QTensor::<3>::int8([[[1.0, 6.35], [2.0, 3.0]]]);
+    let tensor_2 = QTensor::<3>::int8([[[12.7, 4.0], [2.0, 3.0]]]);
 
     let tensor_3 = tensor_1.matmul(tensor_2);
 
@@ -98,10 +98,8 @@ fn test_matmul_3d() {
 #[test]
 #[ignore]
 fn test_matmul_broadcast_4d() {
-    let tensor_1 =
-        QTensor::<TestBackend, 4>::int8([[[[1.0, 7.0], [2.0, 3.0]]], [[[2.0, 5.0], [6.0, 3.0]]]]);
-    let tensor_2 =
-        QTensor::<TestBackend, 4>::int8([[[[9.0, 8.0], [1.0, 4.0]], [[2.0, 7.0], [3.0, 5.0]]]]);
+    let tensor_1 = QTensor::<4>::int8([[[[1.0, 7.0], [2.0, 3.0]]], [[[2.0, 5.0], [6.0, 3.0]]]]);
+    let tensor_2 = QTensor::<4>::int8([[[[9.0, 8.0], [1.0, 4.0]], [[2.0, 7.0], [3.0, 5.0]]]]);
 
     // [2, 1, 2, 2] @ [1, 2, 2, 2] -> [2, 2, 2, 2]
     let tensor_3 = tensor_1.matmul(tensor_2);
@@ -118,9 +116,8 @@ fn test_matmul_broadcast_4d() {
 #[test]
 #[ignore]
 fn test_matmul_broadcast() {
-    let tensor_1 = QTensor::<TestBackend, 3>::int8([[[1.0, 7.0], [2.0, 3.0]]]);
-    let tensor_2 =
-        QTensor::<TestBackend, 3>::int8([[[4.0, 7.0], [2.0, 3.0]], [[2.0, 5.0], [6.0, 3.0]]]);
+    let tensor_1 = QTensor::<3>::int8([[[1.0, 7.0], [2.0, 3.0]]]);
+    let tensor_2 = QTensor::<3>::int8([[[4.0, 7.0], [2.0, 3.0]], [[2.0, 5.0], [6.0, 3.0]]]);
 
     let tensor_3 = tensor_1.matmul(tensor_2);
     let expected = TensorData::from([[[18.0, 28.0], [14.0, 23.0]], [[44.0, 26.0], [22.0, 19.0]]]);
@@ -133,9 +130,8 @@ fn test_matmul_broadcast() {
 #[test]
 #[should_panic]
 fn should_panic_when_inner_dimensions_are_not_equal() {
-    let tensor_1 = QTensor::<TestBackend, 2>::int8([[3., 3.], [4., 4.], [5., 5.], [6., 6.]]);
-    let tensor_2 =
-        QTensor::<TestBackend, 2>::int8([[1., 2., 3., 4.], [1., 2., 3., 4.], [1., 2., 3., 4.]]);
+    let tensor_1 = QTensor::<2>::int8([[3., 3.], [4., 4.], [5., 5.], [6., 6.]]);
+    let tensor_2 = QTensor::<2>::int8([[1., 2., 3., 4.], [1., 2., 3., 4.], [1., 2., 3., 4.]]);
 
     let _ = tensor_1.matmul(tensor_2);
 }
@@ -150,7 +146,7 @@ fn test_matmul_lhs_float_rhs_quantized() {
         [2.0, 3.0, 4.0, 5.0],
         [1.0, 3.0, 5.0, 7.0],
     ]);
-    let tensor_2 = QTensor::<TestBackend, 2>::int8([
+    let tensor_2 = QTensor::<2>::int8([
         [4.0, 8.0, 12.7, 1.6],
         [2.0, 3.0, 6.0, 4.0],
         [1.0, 5.0, 9.0, 2.5],
@@ -171,13 +167,46 @@ fn test_matmul_lhs_float_rhs_quantized() {
 }
 
 #[test]
+fn test_matmul_lhs_quantized_rhs_float() {
+    // Mirror of test_matmul_lhs_float_rhs_quantized: pins the symmetric
+    // (QFloat, Float) arm of the q_matmul dispatch so a future split of the
+    // collapsed match arm cannot regress one direction silently. Uses the
+    // relative tolerance shared by the other quantized matmul tests in this
+    // file because the lhs dynamic range here is smaller than the rhs in the
+    // sibling test, so int8 noise dominates the result more.
+    let tensor_1 = QTensor::<2>::int8([
+        [1.0, 6.35, 2.0, 3.0],
+        [2.0, 3.0, 4.0, 5.0],
+        [1.0, 3.0, 5.0, 7.0],
+    ]);
+    let tensor_2 = TestTensor::<2>::from([
+        [4.0, 8.0, 12.7, 1.6],
+        [2.0, 3.0, 6.0, 4.0],
+        [1.0, 5.0, 9.0, 2.5],
+        [3.0, 7.0, 11.0, 0.5],
+    ]);
+    let tensor_3 = tensor_1.matmul(tensor_2);
+
+    let expected = TensorData::from([
+        [27.7, 58.05, 101.8, 33.5],
+        [33., 80., 134.4, 27.7],
+        [36., 91., 152.7, 29.6],
+    ]);
+    let output = tensor_3.into_data();
+    output.assert_approx_eq::<FloatElem>(&expected, Tolerance::relative(2e-2));
+
+    // Default quantization scheme does not propagate quantization with matmul
+    assert!(output.dtype.is_float());
+}
+
+#[test]
 fn test_matmul_mixed_block_scale() {
     let tensor_1 = TestTensor::<2>::from([
         [1.0, 6.35, 2.0, 3.0],
         [2.0, 3.0, 4.0, 5.0],
         [1.0, 3.0, 5.0, 7.0],
     ]);
-    let tensor_2 = QTensor::<TestBackend, 2>::int8_block([
+    let tensor_2 = QTensor::<2>::int8_block([
         [
             6.110, 4.0, 9.360, 7.850, 0.630, 1.770, 0.430, 7.550, 9.690, 3.560, 2.920, 9.130,
             3.390, 0.510, 1.620, 1.460,

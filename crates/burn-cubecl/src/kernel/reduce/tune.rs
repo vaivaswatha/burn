@@ -9,7 +9,7 @@ use cubecl::{
 use cubek::reduce::{
     ReduceDtypes, ReduceStrategy,
     components::instructions::ReduceOperationConfig,
-    launch::{LineSizeStrategy, RoutineStrategy, tune_key::ReduceAutotuneKey},
+    launch::{RoutineStrategy, VectorizationStrategy, tune_key::ReduceAutotuneKey},
     routines::{BlueprintStrategy, cube::CubeStrategy, plane::PlaneStrategy, unit::UnitStrategy},
 };
 
@@ -40,7 +40,7 @@ pub fn autotune_reduce<R: CubeRuntime>(
                 if key.axis_is_contiguous {
                     PRIORITY_MAX
                 } else {
-                    // We disable the tunable with the setting [line_size.parallel_output_vectorization]
+                    // We disable the tunable with the setting [vector_size.parallel_output_vectorization]
                     // when the reduce isn't parallel, since it would duplicate tunables.
                     PRIORITY_SKIP
                 }
@@ -52,15 +52,15 @@ pub fn autotune_reduce<R: CubeRuntime>(
             Balanced,
         }
 
-        for (line_size, line_size_ident) in [
+        for (vectorization, vector_size_ident) in [
             (
-                LineSizeStrategy {
+                VectorizationStrategy {
                     parallel_output_vectorization: true,
                 },
                 "_vectorized_parallel_reduce",
             ),
             (
-                LineSizeStrategy {
+                VectorizationStrategy {
                     parallel_output_vectorization: false,
                 },
                 "",
@@ -87,9 +87,9 @@ pub fn autotune_reduce<R: CubeRuntime>(
                     ReduceProps::GreatWithLowReduceCount,
                 ),
             ] {
-                let name = format!("{name}{line_size_ident}");
+                let name = format!("{name}{vector_size_ident}");
                 let mut tunable = Tunable::new(
-                    name,
+                    &name,
                     move |(input, output, axis, config, dtypes): (
                         CubeTensor<R>,
                         CubeTensor<R>,
@@ -99,12 +99,12 @@ pub fn autotune_reduce<R: CubeRuntime>(
                     )| {
                         let strategy = ReduceStrategy {
                             routine: routine.clone(),
-                            line_size,
+                            vectorization,
                         };
                         cubek::reduce::reduce::<R>(
-                            &input.client,
-                            input.as_handle_ref(),
-                            output.as_handle_ref(),
+                            &output.client,
+                            input.binding(),
+                            output.clone().binding(),
                             axis,
                             strategy,
                             config,
@@ -113,7 +113,7 @@ pub fn autotune_reduce<R: CubeRuntime>(
                         .map_err(|e| format!("{e}"))
                     },
                 );
-                if line_size.parallel_output_vectorization {
+                if vectorization.parallel_output_vectorization {
                     tunable = tunable.group(&vectorized_parallel_group, |_| PRIORITY_MAX);
                 }
 
@@ -153,11 +153,13 @@ pub fn autotune_reduce<R: CubeRuntime>(
 }
 
 pub(crate) fn create_key<Run: CubeRuntime>(
-    input: &CubeTensor<Run>,
-    output: &CubeTensor<Run>,
-    axis: &usize,
-    _config: &ReduceOperationConfig,
-    dtypes: &ReduceDtypes,
+    (input, output, axis, _config, dtypes): &(
+        CubeTensor<Run>,
+        CubeTensor<Run>,
+        usize,
+        ReduceOperationConfig,
+        ReduceDtypes,
+    ),
 ) -> ReduceAutotuneKey {
     let elem_input = input.dtype.into();
     let elem_output = output.dtype.into();
@@ -182,11 +184,13 @@ mod reduce_ops {
 
     pub(crate) fn reduce_input_gen<Run: CubeRuntime>(
         _key: &ReduceAutotuneKey,
-        input: &CubeTensor<Run>,
-        output: &CubeTensor<Run>,
-        dim: &usize,
-        config: &ReduceOperationConfig,
-        dtypes: &ReduceDtypes,
+        (input, output, dim, config, dtypes): &(
+            CubeTensor<Run>,
+            CubeTensor<Run>,
+            usize,
+            ReduceOperationConfig,
+            ReduceDtypes,
+        ),
     ) -> (
         CubeTensor<Run>,
         CubeTensor<Run>,
@@ -259,13 +263,14 @@ mod sum_ops {
         let client = input.client.clone();
         let device = input.device.clone();
         let output = zeros_client(client.clone(), device, [1].into(), input.dtype);
+        let dtype = input.dtype;
 
         cubek::reduce::shared_sum::<Run>(
-            &input.client,
-            input.as_handle_ref(),
-            output.as_handle_ref(),
+            &output.client,
+            input.binding(),
+            output.clone().binding(),
             C,
-            input.dtype.into(),
+            dtype.into(),
         )
         .map_err(|e| e.to_string())
         .map(|_| output)

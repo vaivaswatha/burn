@@ -1,6 +1,7 @@
 use super::*;
+use burn_tensor::Device;
+use burn_tensor::Distribution;
 use burn_tensor::Tolerance;
-use burn_tensor::{Distribution, Tensor, backend::Backend};
 
 #[test]
 fn cat_should_match_reference_backend_dim0() {
@@ -18,23 +19,22 @@ fn cat_should_support_uneven_launch() {
 }
 
 fn test_same_as_reference(shape: [usize; 2], num_tensors: usize, dim: usize) {
-    let device = Default::default();
-    TestBackend::seed(&device, 0);
+    let device = Device::default();
+    let ref_device = ReferenceDevice::new();
+
+    device.seed(0);
+    ref_device.seed(0);
 
     let tensors = (0..num_tensors)
-        .map(|_| {
-            Tensor::<TestBackend, 2>::random(shape, Distribution::Default, &Default::default())
-        })
+        .map(|_| TestTensor::<2>::random(shape, Distribution::Default, &device))
         .collect::<Vec<_>>();
     let tensors_ref = tensors
         .iter()
-        .map(|tensor| {
-            Tensor::<ReferenceBackend, 2>::from_data(tensor.to_data(), &Default::default())
-        })
+        .map(|tensor| TestTensor::<2>::from_data(tensor.to_data(), &ref_device))
         .collect::<Vec<_>>();
 
-    let tensor = Tensor::<TestBackend, 2>::cat(tensors, dim);
-    let tensor_ref = Tensor::<ReferenceBackend, 2>::cat(tensors_ref, dim);
+    let tensor = TestTensor::<2>::cat(tensors, dim);
+    let tensor_ref = TestTensor::<2>::cat(tensors_ref, dim);
 
     tensor
         .into_data()

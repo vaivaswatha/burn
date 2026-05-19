@@ -6,13 +6,15 @@ use super::writer::BurnpackWriter;
 #[cfg(feature = "std")]
 use crate::KeyRemapper;
 use crate::burnpack::base::BurnpackError;
-use crate::{ModuleSnapshot, ModuleStore, PathFilter, TensorSnapshot};
+use crate::{
+    IdentityAdapter, ModuleAdapter, ModuleSnapshot, ModuleStore, PathFilter, TensorSnapshot,
+};
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use burn_core::prelude::Backend;
-use burn_tensor::Bytes;
+use burn_core::tensor::Bytes;
 
 /// Store mode for BurnpackStore
 enum StoreMode {
@@ -46,6 +48,10 @@ pub struct BurnpackStore {
     /// Key remapper for tensor name transformations
     #[cfg(feature = "std")]
     remapper: KeyRemapper,
+    /// Adapter applied when loading (source -> Burn)
+    from_adapter: Box<dyn ModuleAdapter>,
+    /// Adapter applied when saving (Burn -> target)
+    to_adapter: Box<dyn ModuleAdapter>,
     /// Writer for saving
     writer: Option<BurnpackWriter>,
     /// Reader for loading
@@ -103,6 +109,8 @@ impl BurnpackStore {
             auto_extension: true,
             #[cfg(feature = "std")]
             remapper: KeyRemapper::new(),
+            from_adapter: Box::new(IdentityAdapter),
+            to_adapter: Box::new(IdentityAdapter),
             writer: None,
             reader: None,
             snapshots_cache: None,
@@ -123,6 +131,8 @@ impl BurnpackStore {
             auto_extension: false, // Not used for bytes mode
             #[cfg(feature = "std")]
             remapper: KeyRemapper::new(),
+            from_adapter: Box::new(IdentityAdapter),
+            to_adapter: Box::new(IdentityAdapter),
             writer: None,
             reader: None,
             snapshots_cache: None,
@@ -142,7 +152,7 @@ impl BurnpackStore {
     /// let store = BurnpackStore::from_static(MODEL_DATA);
     /// ```
     pub fn from_static(data: &'static [u8]) -> Self {
-        use burn_tensor::AllocationProperty;
+        use burn_core::tensor::AllocationProperty;
 
         // Create bytes::Bytes from static data (zero-copy, stays in .rodata)
         let shared = bytes::Bytes::from_static(data);
@@ -162,6 +172,8 @@ impl BurnpackStore {
             auto_extension: false,
             #[cfg(feature = "std")]
             remapper: KeyRemapper::new(),
+            from_adapter: Box::new(IdentityAdapter),
+            to_adapter: Box::new(IdentityAdapter),
             writer: None,
             reader: None,
             snapshots_cache: None,
@@ -256,6 +268,18 @@ impl BurnpackStore {
     #[cfg(feature = "std")]
     pub fn auto_extension(mut self, enable: bool) -> Self {
         self.auto_extension = enable;
+        self
+    }
+
+    /// Set the adapter for loading tensors (converting from source format to Burn).
+    pub fn with_from_adapter(mut self, adapter: impl ModuleAdapter + 'static) -> Self {
+        self.from_adapter = Box::new(adapter);
+        self
+    }
+
+    /// Set the adapter for saving tensors (converting from Burn to target format).
+    pub fn with_to_adapter(mut self, adapter: impl ModuleAdapter + 'static) -> Self {
+        self.to_adapter = Box::new(adapter);
         self
     }
 
@@ -370,16 +394,13 @@ impl BurnpackStore {
 impl ModuleStore for BurnpackStore {
     type Error = BurnpackError;
 
-    fn collect_from<B: Backend, M: ModuleSnapshot<B>>(
-        &mut self,
-        module: &M,
-    ) -> Result<(), Self::Error> {
+    fn collect_from<M: ModuleSnapshot>(&mut self, module: &M) -> Result<(), Self::Error> {
         // Invalidate cache since we're writing new data
         self.snapshots_cache = None;
         self.reader = None;
 
-        // Collect snapshots from module
-        let snapshots = module.collect(self.filter.clone(), None, false);
+        // Collect snapshots from module with adapter
+        let snapshots = module.collect(self.filter.clone(), Some(self.to_adapter.clone()), false);
 
         // Initialize writer with snapshots
         let mut writer = BurnpackWriter::new(snapshots);
@@ -425,7 +446,7 @@ impl ModuleStore for BurnpackStore {
         Ok(())
     }
 
-    fn apply_to<B: Backend, M: ModuleSnapshot<B>>(
+    fn apply_to<M: ModuleSnapshot>(
         &mut self,
         module: &mut M,
     ) -> Result<crate::ApplyResult, Self::Error> {
@@ -435,7 +456,12 @@ impl ModuleStore for BurnpackStore {
         // Apply all snapshots at once to the module
         // Burnpack is Burn's native format, so no enum variant skipping needed
         // Filter is applied here during apply, not during cache population
-        let result = module.apply(snapshots, self.filter.clone(), None, false);
+        let result = module.apply(
+            snapshots,
+            self.filter.clone(),
+            Some(self.from_adapter.clone()),
+            false,
+        );
 
         // Validate if needed
         if self.validate && !result.errors.is_empty() {

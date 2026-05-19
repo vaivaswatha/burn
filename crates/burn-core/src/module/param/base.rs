@@ -1,8 +1,11 @@
 use super::ParamId;
-use alloc::{boxed::Box, format};
+use super::sync_once_cell::SyncOnceCell;
+use alloc::format;
+
+#[cfg(not(target_has_atomic = "ptr"))]
+use alloc::boxed::Box;
 use burn_std::stub::RwLock;
-use burn_tensor::Shape;
-use core::cell::OnceCell;
+use burn_tensor::{Device, Shape};
 use core::ops::Deref;
 
 #[cfg(target_has_atomic = "ptr")]
@@ -27,6 +30,29 @@ fn new_mapper<T, F: Fn(T) -> T + Send + Sync + 'static>(func: F) -> Mapper<T> {
     Arc::new(Box::new(func))
 }
 
+/// Type alias for the init function stored in `Uninitialized`.
+/// On targets without atomics, `portable_atomic_util::Arc` needs `Box` indirection
+/// for unsized types, mirroring the `Mapper` pattern above.
+#[cfg(target_has_atomic = "ptr")]
+type InitFn<P> = Arc<dyn Fn(&Device, bool) -> P + Send + Sync>;
+
+#[cfg(not(target_has_atomic = "ptr"))]
+type InitFn<P> = Arc<Box<dyn Fn(&Device, bool) -> P + Send + Sync>>;
+
+#[cfg(target_has_atomic = "ptr")]
+fn new_init_fn<P: Parameter, F: Fn(&Device, bool) -> P + Send + Sync + 'static>(
+    func: F,
+) -> InitFn<P> {
+    Arc::new(func)
+}
+
+#[cfg(not(target_has_atomic = "ptr"))]
+fn new_init_fn<P: Parameter, F: Fn(&Device, bool) -> P + Send + Sync + 'static>(
+    func: F,
+) -> InitFn<P> {
+    Arc::new(Box::new(func))
+}
+
 /// Parameters are the fundamental building blocks of [modules](crate::module::Module) where they
 /// serve as containers for [tensors](crate::tensor::Tensor) that can be updated during
 /// training, and loaded during inference. If you don't want to save the tensors
@@ -34,20 +60,20 @@ fn new_mapper<T, F: Fn(T) -> T + Send + Sync + 'static>(func: F) -> Mapper<T> {
 ///
 /// # Core Lazy Initialization Architecture
 ///
-/// `Param<T>` has a dual-state design using `OnceCell<T>`:
+/// `Param<T>` has a dual-state design using `SyncOnceCell<T>`:
 ///
 /// ## State Management
 ///
 /// **Two possible states:**
 ///
-/// 1. **Initialized**: `state: OnceCell<T>` contains value, `initialization: None`
+/// 1. **Initialized**: `state: SyncOnceCell<T>` contains value, `initialization: None`
 /// 2. **Uninitialized (Lazy)**: `state` is empty, `initialization: Some(RwLock<Option<Uninitialized<T>>>)`
 pub struct Param<T: Parameter> {
     /// The unique ID of this parameter. This is used by eg. optimizers to associate a gradient with a specific parameter.
     pub id: ParamId,
-    /// The OnceCell holding the initialized parameter value.
+    /// The SyncOnceCell holding the initialized parameter value.
     /// Empty for uninitialized parameters, populated after first access or explicit initialization.
-    pub(crate) state: OnceCell<T>,
+    pub(crate) state: SyncOnceCell<T>,
     /// The deferred initialization state for lazy parameters.
     ///
     /// **State Transitions:**
@@ -128,11 +154,8 @@ impl<T: Parameter> core::fmt::Debug for Param<T> {
 
 /// Trait that defines what is necessary for a type to be a parameter.
 pub trait Parameter: Clone + core::fmt::Debug + Send {
-    /// The device type to be used.
-    type Device: Clone;
-
     /// Fetch the device.
-    fn device(&self) -> Self::Device;
+    fn device(&self) -> Device;
 
     /// Fetch the gradient requirement.
     fn is_require_grad(&self) -> bool;
@@ -145,11 +168,13 @@ pub trait Parameter: Clone + core::fmt::Debug + Send {
 #[allow(clippy::type_complexity)]
 pub(crate) struct Uninitialized<P: Parameter> {
     /// The initialization function. Called with `(device, is_require_grad) -> Parameter`.
-    /// This function is consumed during initialization via `FnOnce`.
-    init: Box<dyn FnOnce(&P::Device, bool) -> P + Send>,
+    /// Wrapped in `Arc` so that cloning a `Param` preserves the lazy state without
+    /// triggering initialization. Each clone holds its own `Uninitialized` state and
+    /// will run the init function separately on first access (producing independent values).
+    init: InitFn<P>,
     /// The target device on which the parameter should be initialized.
     /// Used by `lazy_device()` to provide device information without triggering initialization.
-    pub(crate) device: P::Device,
+    pub(crate) device: Device,
     /// The gradient requirement for the parameter.
     /// Used by `lazy_is_require_grad()` to provide gradient settings without triggering initialization.
     pub(crate) is_require_grad: bool,
@@ -158,14 +183,28 @@ pub(crate) struct Uninitialized<P: Parameter> {
     pub(crate) shape: Shape,
 }
 
+impl<P: Parameter> Clone for Uninitialized<P> {
+    fn clone(&self) -> Self {
+        Self {
+            init: self.init.clone(),
+            device: self.device.clone(),
+            is_require_grad: self.is_require_grad,
+            shape: self.shape.clone(),
+        }
+    }
+}
+
 impl<P: Parameter> Uninitialized<P> {
-    /// Consumes the uninitialized state and runs the initialization function.
+    /// Runs the initialization function.
     ///
     /// This is called by [Param::val] when accessing an uninitialized parameter for the first time.
     /// The function is given the stored device and gradient requirement, and returns the initialized parameter.
-    fn initialize(self) -> P {
-        let init = self.init;
-        init(&self.device, self.is_require_grad)
+    ///
+    /// Although this takes `&self` (the `Arc<dyn Fn>` is callable multiple times), callers
+    /// are expected to invoke this only once per `Param` instance. The caller (`val()`) takes
+    /// the `Uninitialized` out of its `Option` via `take()` to enforce single-initialization.
+    fn initialize(&self) -> P {
+        (self.init)(&self.device, self.is_require_grad)
     }
 }
 
@@ -175,7 +214,7 @@ impl<T: Parameter> Param<T> {
         let require_grad = value.is_require_grad();
         Self {
             id,
-            state: OnceCell::from(value),
+            state: SyncOnceCell::initialized(value),
             initialization: None,
             param_mapper: Default::default(),
             require_grad,
@@ -186,18 +225,18 @@ impl<T: Parameter> Param<T> {
     pub fn uninitialized<F>(
         id: ParamId,
         init: F,
-        device: T::Device,
+        device: Device,
         is_require_grad: bool,
         shape: Shape,
     ) -> Self
     where
-        F: FnOnce(&T::Device, bool) -> T + Send + 'static,
+        F: Fn(&Device, bool) -> T + Send + Sync + 'static,
     {
         Self {
             id,
-            state: OnceCell::new(),
+            state: SyncOnceCell::new(),
             initialization: Some(RwLock::new(Some(Uninitialized {
-                init: Box::new(init),
+                init: new_init_fn(init),
                 device,
                 is_require_grad,
                 shape,
@@ -256,7 +295,7 @@ impl<T: Parameter> Param<T> {
 
         Self {
             id,
-            state: OnceCell::from(tensor),
+            state: SyncOnceCell::initialized(tensor),
             initialization: None,
             param_mapper,
             require_grad,
@@ -271,7 +310,7 @@ impl<T: Parameter> Param<T> {
         let require_grad = value.is_require_grad();
         Self {
             id,
-            state: OnceCell::from(value),
+            state: SyncOnceCell::initialized(value),
             initialization: None,
             param_mapper,
             require_grad,
@@ -293,7 +332,7 @@ impl<T: Parameter> Param<T> {
     }
 
     /// Execute the given function on the inner value.
-    pub fn init_mapper<F: FnOnce(T) -> T + Send + 'static>(self, func: F) -> Self
+    pub fn init_mapper<F: Fn(T) -> T + Send + Sync + 'static>(self, func: F) -> Self
     where
         T: 'static,
     {
@@ -306,12 +345,9 @@ impl<T: Parameter> Param<T> {
 
         match init.as_mut() {
             Some(value) => {
-                #[allow(clippy::type_complexity)]
-                let mut prev: Box<dyn FnOnce(&T::Device, bool) -> T + Send> =
-                    Box::new(|_, _| panic!("Fake func to not have null ref."));
-                core::mem::swap(&mut prev, &mut value.init);
+                let prev = value.init.clone();
 
-                value.init = Box::new(|a, b| {
+                value.init = new_init_fn(move |a, b| {
                     let tensor = prev(a, b);
                     func(tensor)
                 });
@@ -333,7 +369,7 @@ impl<T: Parameter> Param<T> {
     ///
     /// Use this instead of [crate::tensor::Tensor::device] when you need the device but want to
     /// preserve lazy initialization.
-    pub fn lazy_device(&self) -> T::Device {
+    pub fn lazy_device(&self) -> Device {
         let initialization = match &self.initialization {
             Some(init) => init,
             None => return self.device(),
@@ -399,6 +435,25 @@ impl<T: Parameter> Param<T> {
 
 impl<T: Parameter> Clone for Param<T> {
     fn clone(&self) -> Self {
+        // If uninitialized, clone the lazy state without triggering initialization.
+        // This avoids allocating tensor memory for params that may never be used
+        // (e.g., when cloning a module just to load weights into it).
+        // The clone gets its own SyncOnceCell and RwLock, so initializing one
+        // does not affect the other.
+        if let Some(init_lock) = &self.initialization {
+            let init_guard = init_lock.read().unwrap();
+            if let Some(uninit) = init_guard.as_ref() {
+                return Self {
+                    id: self.id,
+                    state: SyncOnceCell::new(),
+                    initialization: Some(RwLock::new(Some(uninit.clone()))),
+                    param_mapper: self.param_mapper.clone(),
+                    require_grad: self.require_grad,
+                };
+            }
+        }
+
+        // Already initialized (or init was already consumed): clone the value.
         let mut param = Param::initialized(self.id, self.val());
         param.param_mapper = self.param_mapper.clone();
         param
@@ -420,5 +475,57 @@ impl<T: Parameter> Deref for Param<T> {
             let state = result.take().expect("Should exist when not initialized");
             state.initialize()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn_tensor::Tensor;
+
+    // Param<T> should be Sync so that models can be shared across threads
+    // (e.g. parallel inference with rayon).
+    fn _assert_sync<T: Sync>() {}
+
+    #[test]
+    fn param_is_sync() {
+        fn check() {
+            _assert_sync::<Param<Tensor<2>>>();
+        }
+        check();
+    }
+
+    /// Concurrent lazy initialization must not panic.
+    ///
+    /// Multiple threads call `val()` on an uninitialized `Param` simultaneously.
+    /// `SyncOnceCell::get_or_init` guarantees only one thread runs the initializer;
+    /// the others block and receive the same value.
+    #[cfg(feature = "std")]
+    #[test]
+    fn param_concurrent_lazy_init() {
+        use alloc::vec::Vec;
+
+        let device = Default::default();
+
+        let param: Param<Tensor<2>> = Param::uninitialized(
+            ParamId::new(),
+            |device, _require_grad| Tensor::zeros([2, 3], device),
+            device,
+            false,
+            [2, 3].into(),
+        );
+
+        // Share across threads via &param (requires Sync).
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4).map(|_| s.spawn(|| param.val())).collect();
+
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            // All threads must get the same value.
+            let expected = results[0].to_data();
+            for result in &results[1..] {
+                assert_eq!(result.to_data(), expected);
+            }
+        });
     }
 }

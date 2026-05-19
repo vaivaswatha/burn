@@ -2,13 +2,11 @@ use crate::{CubeRuntime, ops::numeric::empty_device_dtype, tensor::CubeTensor};
 use burn_backend::ops::{ConvOptions, conv::calculate_conv_output_sizes};
 use cubek::{
     convolution::{
-        AcceleratedTileKind, ConvolutionArgs, ReadingStrategy, Strategy,
-        components::ConvSetupError, forward,
+        AcceleratedTileKind, ConvAlgorithm, ConvolutionArgs, ConvolutionInputs, Strategy,
+        components::ConvSetupError, launch_ref,
     },
-    matmul::{
-        definition::{MatmulElems, MatmulGlobalElems},
-        launch::MatmulInputHandleRef,
-    },
+    matmul::definition::{MatmulElems, MatmulGlobalElems},
+    std::InputBinding,
 };
 
 /// Perform a 2D convolution using the implicit GEMM (im2col) algorithm, using cubecl tiling matmul
@@ -25,20 +23,18 @@ pub fn conv_gemm_simple_sync<R: CubeRuntime, const N: usize>(
     options: ConvOptions<N>,
     tile_kind: AcceleratedTileKind,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
-    let read_strategy = match tile_kind {
-        AcceleratedTileKind::Cmma => ReadingStrategy::Cyclic,
-        AcceleratedTileKind::Mma => ReadingStrategy::Strided,
-    };
-    launch_convolution_forward::<R, N>(
-        &Strategy::Simple {
-            read_strategy,
+    let strategy = match tile_kind {
+        AcceleratedTileKind::Cmma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleSyncCyclic,
             tile_kind,
         },
-        input,
-        weight,
-        bias,
-        options,
-    )
+        AcceleratedTileKind::Mma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleSyncStrided,
+            tile_kind,
+        },
+    };
+
+    launch_convolution_forward::<R, N>(&strategy, input, weight, bias, options)
 }
 
 pub fn conv_gemm_simple_async<R: CubeRuntime, const N: usize>(
@@ -48,20 +44,18 @@ pub fn conv_gemm_simple_async<R: CubeRuntime, const N: usize>(
     options: ConvOptions<N>,
     tile_kind: AcceleratedTileKind,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
-    let read_strategy = match tile_kind {
-        AcceleratedTileKind::Cmma => ReadingStrategy::AsyncCyclic,
-        AcceleratedTileKind::Mma => ReadingStrategy::AsyncStrided,
-    };
-    launch_convolution_forward::<R, N>(
-        &Strategy::Simple {
-            read_strategy,
+    let strategy = match tile_kind {
+        AcceleratedTileKind::Cmma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleAsyncCyclic,
             tile_kind,
         },
-        input,
-        weight,
-        bias,
-        options,
-    )
+        AcceleratedTileKind::Mma => Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleAsyncStrided,
+            tile_kind,
+        },
+    };
+
+    launch_convolution_forward::<R, N>(&strategy, input, weight, bias, options)
 }
 
 /// Perform a 2D convolution using the implicit GEMM (im2col) algorithm, using cubecl tiling matmul
@@ -79,8 +73,8 @@ pub fn conv_gemm_simple_tma<R: CubeRuntime, const N: usize>(
     tile_kind: AcceleratedTileKind,
 ) -> Result<CubeTensor<R>, ConvSetupError> {
     launch_convolution_forward::<R, N>(
-        &Strategy::Simple {
-            read_strategy: ReadingStrategy::Tma,
+        &Strategy::Inferred {
+            algorithm: ConvAlgorithm::SimpleAsyncTma,
             tile_kind,
         },
         input,
@@ -135,9 +129,10 @@ pub fn launch_convolution_forward<R: CubeRuntime, const N: usize>(
         out_dtype,
     );
 
-    let bias = bias
-        .as_ref()
-        .map(|bias| MatmulInputHandleRef::Normal(bias.as_handle_ref(), bias.dtype.into()));
+    let bias = bias.map(|bias| {
+        let dtype = bias.dtype;
+        InputBinding::Normal(bias.binding(), dtype.into())
+    });
 
     let client = input.client.clone();
     let dtypes = MatmulElems::from_globals(&MatmulGlobalElems {
@@ -145,16 +140,20 @@ pub fn launch_convolution_forward<R: CubeRuntime, const N: usize>(
         rhs: weight.dtype.into(),
         out: out_dtype.into(),
     });
-    let input = MatmulInputHandleRef::new(input.as_handle_ref(), input.dtype.into());
-    let weight = MatmulInputHandleRef::new(weight.as_handle_ref(), weight.dtype.into());
+    let input_dtype = input.dtype;
+    let weight_dtype = weight.dtype;
+    let input = InputBinding::new(input.binding(), input_dtype.into());
+    let weight = InputBinding::new(weight.binding(), weight_dtype.into());
 
-    forward::launch_ref::<R, N>(
+    launch_ref::<R, N>(
         strategy,
         &client,
-        &input,
-        &weight,
-        &bias,
-        &out.as_handle_ref(),
+        ConvolutionInputs::Forward {
+            input,
+            weight,
+            bias,
+            out: out.clone().binding(),
+        },
         ConvolutionArgs {
             stride: options.stride,
             padding: options.padding,

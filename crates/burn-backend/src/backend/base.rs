@@ -1,17 +1,41 @@
 use burn_std::DType;
-pub use burn_std::backtrace::BackTrace;
+pub use burn_std::{ExecutionError, backtrace::BackTrace};
 
-use alloc::string::String;
-use enumset::{EnumSet, EnumSetType};
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-use crate::element::Element;
+pub use crate::element::Element;
 use crate::ops::*;
 use crate::tensor::{BoolTensor, FloatTensor, IntTensor, QuantizedTensor};
 use crate::{QTensorPrimitive, TensorData, TensorMetadata};
+use alloc::string::String;
+use enumset::{EnumSet, EnumSetType};
+
+#[cfg(feature = "distributed")]
+use crate::distributed::{DistributedParamId, DistributedParams};
 
 use super::DeviceOps;
+
+/// The mapping of types used by Backend and traits.
+pub trait BackendTypes {
+    /// Device type.
+    type Device: DeviceOps;
+
+    /// Tensor primitive to be used for all float operations.
+    type FloatTensorPrimitive: TensorMetadata + 'static;
+    /// Default float element type.
+    type FloatElem: Element;
+
+    /// Tensor primitive to be used for all int operations.
+    type IntTensorPrimitive: TensorMetadata + 'static;
+    /// Int element type.
+    type IntElem: Element;
+
+    /// Tensor primitive to be used for all bool operations.
+    type BoolTensorPrimitive: TensorMetadata + 'static;
+    /// Tensor primitive to be used for all bool operations.
+    type BoolElem: Element;
+
+    /// Tensor primitive to be used for all quantized operations.
+    type QuantizedTensorPrimitive: TensorMetadata + QTensorPrimitive + 'static;
+}
 
 /// This trait defines all types and functions needed for a backend to be used with burn.
 ///
@@ -63,7 +87,8 @@ use super::DeviceOps;
 /// struct in the `burn-tensor` crate.
 /// For modules, public functions are often created, which can be used by `burn-core` modules.
 pub trait Backend:
-    FloatTensorOps<Self>
+    BackendTypes
+    + FloatTensorOps<Self>
     + BoolTensorOps<Self>
     + IntTensorOps<Self>
     + ModuleOps<Self>
@@ -78,27 +103,6 @@ pub trait Backend:
     + core::fmt::Debug
     + 'static
 {
-    /// Device type.
-    type Device: DeviceOps;
-
-    /// Tensor primitive to be used for all float operations.
-    type FloatTensorPrimitive: TensorMetadata + 'static;
-    /// Default float element type.
-    type FloatElem: Element;
-
-    /// Tensor primitive to be used for all int operations.
-    type IntTensorPrimitive: TensorMetadata + 'static;
-    /// Int element type.
-    type IntElem: Element;
-
-    /// Tensor primitive to be used for all bool operations.
-    type BoolTensorPrimitive: TensorMetadata + 'static;
-    /// Tensor primitive to be used for all bool operations.
-    type BoolElem: Element;
-
-    /// Tensor primitive to be used for all quantized operations.
-    type QuantizedTensorPrimitive: TensorMetadata + QTensorPrimitive + 'static;
-
     /// If autodiff is enabled.
     fn ad_enabled(_device: &Self::Device) -> bool {
         false
@@ -106,7 +110,11 @@ pub trait Backend:
 
     /// Sets the current allocation mode to persistent.
     #[allow(unused_variables)]
-    fn memory_persistent_allocations<Output, Input, Func: Fn(Input) -> Output>(
+    fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
         device: &Self::Device,
         input: Input,
         func: Func,
@@ -160,36 +168,12 @@ pub trait Backend:
 
     /// Returns the [DTypeUsageSet] for the given [DType] on the specified device.
     fn dtype_usage(device: &Self::Device, dtype: DType) -> DTypeUsageSet;
-}
 
-/// An error that can happen when syncing a device.
-#[derive(Error, Serialize, Deserialize)]
-pub enum ExecutionError {
-    /// A generic error happened during execution.
-    ///
-    /// The backtrace and context information should be included in the reason string.
-    #[error("An error happened during execution\nCaused by:\n  {reason}")]
-    WithContext {
-        /// The reason of the error.
-        reason: String,
-    },
-    /// A generic error happened during execution thrown in the Burn project.
-    ///
-    /// The full context isn't captured by the string alone.
-    #[error("An error happened during execution\nCaused by:\n  {reason}")]
-    Generic {
-        /// The reason of the error.
-        reason: String,
-        /// The backtrace.
-        #[serde(skip)]
-        backtrace: BackTrace,
-    },
-}
-
-impl core::fmt::Debug for ExecutionError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_fmt(format_args!("{self}"))
-    }
+    /// Returns the number of devices available on this backend.
+    /// `device` is a reference device used to determine the underlying backend that should be queried.
+    /// A CUDA device will return all devices available to CUDA, a Vulkan device will return all
+    /// devices available to Vulkan, etc.
+    fn device_count(type_id: u16) -> usize;
 }
 
 /// Trait that allows a backend to support autodiff.
@@ -346,6 +330,30 @@ pub trait AutodiffBackend: Backend {
     ///
     /// The autodiff backend tensor.
     fn q_from_inner(tensor: QuantizedTensor<Self::InnerBackend>) -> QuantizedTensor<Self>;
+
+    #[cfg(feature = "distributed")]
+    /// Mark the tensor as distributed across multiple devices.
+    /// The gradients will be aggregated during the backward pass.
+    ///
+    /// This function does nothing when distributed training is not available.
+    fn set_distributed_params(
+        tensor: FloatTensor<Self>,
+        _param_id: DistributedParamId,
+    ) -> FloatTensor<Self> {
+        tensor
+    }
+
+    #[cfg(feature = "distributed")]
+    /// Returns the distributed parameters if the tensor was marked as distributed.
+    fn distributed_params(_tensor: &FloatTensor<Self>) -> Option<DistributedParams> {
+        None
+    }
+
+    #[cfg(feature = "distributed")]
+    /// Returns true if the tensor was marked as distributed.
+    fn is_distributed(_tensor: &FloatTensor<Self>) -> bool {
+        false
+    }
 }
 
 /// Describes how a data type can be used on a given device.

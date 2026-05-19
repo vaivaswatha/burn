@@ -3,8 +3,8 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use burn_core::module::ParamId;
-use burn_tensor::quantization::{QPARAM_ALIGN, QuantParam, params_shape};
-use burn_tensor::{Bool, DType, Int, Shape, Tensor, TensorData, backend::Backend};
+use burn_core::tensor::quantization::{QPARAM_ALIGN, QuantParam, params_shape};
+use burn_core::tensor::{Bool, DType, Int, Shape, Tensor, TensorData};
 use half::f16;
 
 /// Returns the byte size of a quantization parameter type.
@@ -52,9 +52,9 @@ pub struct TensorSnapshot {
     /// Function to get tensor data when needed (Rc allows cloning)
     data_fn: Rc<dyn Fn() -> Result<TensorData, TensorSnapshotError>>,
     /// Data type of the tensor (cached for efficient access)
-    pub dtype: burn_tensor::DType,
+    pub dtype: DType,
     /// Shape of the tensor (cached for efficient access)
-    pub shape: Vec<usize>,
+    pub shape: Shape,
     /// Path stack representing the module hierarchy
     pub path_stack: Option<Vec<String>>,
     /// Container stack representing the container types at each level
@@ -65,14 +65,14 @@ pub struct TensorSnapshot {
 
 impl TensorSnapshot {
     /// Create a new tensor snapshot from a float tensor
-    pub fn from_float<B: Backend, const D: usize>(
-        tensor: &Tensor<B, D>,
+    pub fn from_float<const D: usize>(
+        tensor: &Tensor<D>,
         path_stack: Vec<String>,
         container_stack: Vec<String>,
         tensor_id: ParamId,
     ) -> Self {
         let dtype = tensor.dtype();
-        let shape = tensor.shape().to_vec();
+        let shape = tensor.shape();
         let tensor = tensor.clone(); // Clone is cheap (reference counted)
         Self {
             data_fn: Rc::new(move || Ok(tensor.to_data())),
@@ -85,14 +85,14 @@ impl TensorSnapshot {
     }
 
     /// Create a new tensor snapshot from an int tensor
-    pub fn from_int<B: Backend, const D: usize>(
-        tensor: &Tensor<B, D, Int>,
+    pub fn from_int<const D: usize>(
+        tensor: &Tensor<D, Int>,
         path_stack: Vec<String>,
         container_stack: Vec<String>,
         tensor_id: ParamId,
     ) -> Self {
         let dtype = tensor.dtype();
-        let shape = tensor.shape().to_vec();
+        let shape = tensor.shape();
         let tensor = tensor.clone(); // Clone is cheap (reference counted)
         Self {
             data_fn: Rc::new(move || Ok(tensor.to_data())),
@@ -105,14 +105,14 @@ impl TensorSnapshot {
     }
 
     /// Create a new tensor snapshot from a bool tensor
-    pub fn from_bool<B: Backend, const D: usize>(
-        tensor: &Tensor<B, D, Bool>,
+    pub fn from_bool<const D: usize>(
+        tensor: &Tensor<D, Bool>,
         path_stack: Vec<String>,
         container_stack: Vec<String>,
         tensor_id: ParamId,
     ) -> Self {
         let dtype = tensor.dtype();
-        let shape = tensor.shape().to_vec();
+        let shape = tensor.shape();
         let tensor = tensor.clone(); // Clone is cheap (reference counted)
         Self {
             data_fn: Rc::new(move || Ok(tensor.to_data())),
@@ -203,8 +203,8 @@ impl TensorSnapshot {
     /// This is used internally for lazy loading
     pub fn from_closure(
         data_fn: Rc<dyn Fn() -> Result<TensorData, TensorSnapshotError>>,
-        dtype: burn_tensor::DType,
-        shape: Vec<usize>,
+        dtype: DType,
+        shape: Shape,
         path_stack: Vec<String>,
         container_stack: Vec<String>,
         tensor_id: ParamId,
@@ -259,8 +259,7 @@ impl TensorSnapshot {
                     num_storage_elements * (scheme.size_bits_stored() / BITS_PER_BYTE);
 
                 // Calculate number of quantization parameters (scales)
-                let num_params =
-                    params_shape(&Shape::from(self.shape.clone()), scheme.level).num_elements();
+                let num_params = params_shape(&self.shape, scheme.level).num_elements();
 
                 let aligned_value_bytes = value_bytes.div_ceil(QPARAM_ALIGN) * QPARAM_ALIGN;
                 let scale_bytes = num_params * quant_param_size(scheme.param);
@@ -306,14 +305,13 @@ impl core::fmt::Debug for TensorSnapshot {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    type TestBackend = burn_ndarray::NdArray;
     use alloc::string::ToString;
-    use burn_tensor::DType;
+    use burn_core::tensor::{BoolStore, Device, shape};
 
     #[test]
     fn tensor_view_float() {
         let device = Default::default();
-        let tensor = Tensor::<TestBackend, 2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
+        let tensor = Tensor::<2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
 
         let snapshot = TensorSnapshot::from_float(
             &tensor,
@@ -324,20 +322,20 @@ mod tests {
 
         // Test metadata access without materialization
         assert_eq!(snapshot.dtype, DType::F32);
-        assert_eq!(snapshot.shape, vec![2, 2]);
+        assert_eq!(snapshot.shape, shape![2, 2]);
         assert_eq!(snapshot.full_path(), "test.weight");
         assert_eq!(snapshot.container_path(), "TestModule.Param");
 
         // Test data materialization
         let data = snapshot.to_data().unwrap();
-        assert_eq!(data.shape, vec![2, 2]);
+        assert_eq!(data.shape, shape![2, 2]);
         assert_eq!(data.dtype, DType::F32);
     }
 
     #[test]
     fn tensor_view_int() {
         let device = Default::default();
-        let tensor = Tensor::<TestBackend, 2, Int>::from_data([[1, 2], [3, 4]], &device);
+        let tensor = Tensor::<2, Int>::from_data([[1, 2], [3, 4]], &device);
 
         let snapshot = TensorSnapshot::from_int(
             &tensor,
@@ -347,20 +345,19 @@ mod tests {
         );
 
         // Test metadata access without materialization
-        // TestBackend uses I64 for integers
-        assert_eq!(snapshot.dtype, DType::I64);
-        assert_eq!(snapshot.shape, vec![2, 2]);
+        let dtype: DType = device.settings().int_dtype.into();
+        assert_eq!(snapshot.dtype, dtype);
+        assert_eq!(snapshot.shape, shape![2, 2]);
 
         let data = snapshot.to_data().unwrap();
-        assert_eq!(data.shape, vec![2, 2]);
-        assert_eq!(data.dtype, DType::I64);
+        assert_eq!(data.shape, shape![2, 2]);
+        assert_eq!(data.dtype, dtype);
     }
 
     #[test]
     fn tensor_view_bool() {
         let device = Default::default();
-        let tensor =
-            Tensor::<TestBackend, 2, Bool>::from_data([[true, false], [false, true]], &device);
+        let tensor = Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device);
 
         let snapshot = TensorSnapshot::from_bool(
             &tensor,
@@ -370,49 +367,51 @@ mod tests {
         );
 
         // Test metadata access without materialization
-        assert_eq!(snapshot.dtype, DType::Bool);
-        assert_eq!(snapshot.shape, vec![2, 2]);
+        assert_eq!(snapshot.dtype, DType::Bool(BoolStore::Native));
+        assert_eq!(snapshot.shape, shape![2, 2]);
 
         let data = snapshot.to_data().unwrap();
-        assert_eq!(data.shape, vec![2, 2]);
-        assert_eq!(data.dtype, DType::Bool);
+        assert_eq!(data.shape, shape![2, 2]);
+        assert_eq!(data.dtype, DType::Bool(BoolStore::Native));
     }
 
     #[test]
     fn data_len() {
-        let device = Default::default();
+        let device = Device::default();
+        let settings = device.settings();
 
         // Test F32 tensor (4 bytes per element)
-        let tensor_f32 = Tensor::<TestBackend, 2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
+        let tensor_f32 = Tensor::<2>::from_data([[1.0, 2.0], [3.0, 4.0]], &device);
         let view_f32 = TensorSnapshot::from_float(
             &tensor_f32,
             vec!["test".to_string()],
             vec!["Module".to_string()],
             ParamId::new(),
         );
-        assert_eq!(view_f32.data_len(), 16); // 4 elements * 4 bytes
+        let dtype: DType = settings.float_dtype.into();
+        assert_eq!(view_f32.data_len(), 4 * dtype.size()); // 4 elements * 4 bytes
 
-        // Test I64 tensor (8 bytes per element) - TestBackend uses I64 for Int
-        let tensor_i64 =
-            Tensor::<TestBackend, 3, Int>::from_data([[[1, 2], [3, 4]], [[5, 6], [7, 8]]], &device);
+        // Test int tensor
+        let tensor_i64 = Tensor::<3, Int>::from_data([[[1, 2], [3, 4]], [[5, 6], [7, 8]]], &device);
         let view_i64 = TensorSnapshot::from_int(
             &tensor_i64,
             vec!["test".to_string()],
             vec!["Module".to_string()],
             ParamId::new(),
         );
-        assert_eq!(view_i64.data_len(), 64); // 8 elements * 8 bytes (I64)
+        let dtype: DType = settings.int_dtype.into();
+        assert_eq!(view_i64.data_len(), 8 * dtype.size()); // 8 elements * 8 bytes (I64)
 
         // Test Bool tensor (1 byte per element)
-        let tensor_bool =
-            Tensor::<TestBackend, 2, Bool>::from_data([[true, false], [false, true]], &device);
+        let tensor_bool = Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device);
         let view_bool = TensorSnapshot::from_bool(
             &tensor_bool,
             vec!["test".to_string()],
             vec!["Module".to_string()],
             ParamId::new(),
         );
-        assert_eq!(view_bool.data_len(), 4); // 4 elements * 1 byte
+        let dtype: DType = settings.bool_dtype.into();
+        assert_eq!(view_bool.data_len(), 4 * dtype.size()); // 4 elements * 1 byte
     }
 
     #[test]
@@ -432,13 +431,13 @@ mod tests {
 
         // Test metadata access
         assert_eq!(snapshot.dtype, DType::F32);
-        assert_eq!(snapshot.shape, vec![4]);
+        assert_eq!(snapshot.shape, shape![4]);
         assert_eq!(snapshot.full_path(), "model.layer");
         assert_eq!(snapshot.data_len(), 16); // 4 * 4 bytes
 
         // Test data materialization
         let materialized = snapshot.to_data().unwrap();
-        assert_eq!(materialized.shape, vec![4]);
+        assert_eq!(materialized.shape, shape![4]);
     }
 
     #[test]
@@ -475,7 +474,7 @@ mod tests {
         let snapshot = TensorSnapshot {
             data_fn: Rc::new(|| panic!("Test panic in data_fn")),
             dtype: DType::F32,
-            shape: vec![2, 2],
+            shape: shape![2, 2],
             path_stack: Some(vec!["test".to_string()]),
             container_stack: Some(vec!["Test".to_string()]),
             tensor_id: Some(ParamId::new()),
@@ -501,7 +500,7 @@ mod tests {
         let snapshot = TensorSnapshot::from_closure(
             Rc::new(|| Err(TensorSnapshotError::IoError("Simulated IO error".into()))),
             DType::F32,
-            vec![2, 2],
+            shape![2, 2],
             vec!["error_test".into()],
             vec![],
             ParamId::new(),
@@ -521,7 +520,7 @@ mod tests {
     #[test]
     fn container_type_extraction() {
         let device = Default::default();
-        let tensor = Tensor::<TestBackend, 1>::from_data([1.0, 2.0, 3.0], &device);
+        let tensor = Tensor::<1>::from_data([1.0, 2.0, 3.0], &device);
 
         let snapshot = TensorSnapshot::from_float(
             &tensor,
@@ -550,7 +549,7 @@ mod tests {
     #[test]
     fn container_type_vs_module_type() {
         let device = Default::default();
-        let tensor = Tensor::<TestBackend, 1>::from_data([1.0, 2.0, 3.0], &device);
+        let tensor = Tensor::<1>::from_data([1.0, 2.0, 3.0], &device);
 
         // Test case 1: Tensor inside a Vec<Linear>
         // container_stack: ["Struct:Model", "Vec", "Struct:Linear"]

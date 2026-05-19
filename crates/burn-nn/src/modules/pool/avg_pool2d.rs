@@ -2,10 +2,9 @@ use burn_core as burn;
 
 use crate::PaddingConfig2d;
 use burn::config::Config;
+use burn::module::Module;
 use burn::module::{Content, DisplaySettings, ModuleDisplay};
-use burn::module::{Ignored, Module};
 use burn::tensor::Tensor;
-use burn::tensor::backend::Backend;
 use burn::tensor::ops::PadMode;
 
 use burn::tensor::module::avg_pool2d;
@@ -43,7 +42,7 @@ pub struct AvgPool2dConfig {
 /// legitimate values, and they contribute to the denominator
 /// when calculating the average. This is equivalent to
 /// `torch.nn.AvgPool2d` with `count_include_pad=True`.
-#[derive(Module, Clone, Debug)]
+#[derive(Module, Debug)]
 #[module(custom_display)]
 pub struct AvgPool2d {
     /// Stride of the pooling.
@@ -51,7 +50,8 @@ pub struct AvgPool2d {
     /// Size of the kernel.
     pub kernel_size: [usize; 2],
     /// Padding configuration.
-    pub padding: Ignored<PaddingConfig2d>,
+    #[module(skip)]
+    pub padding: PaddingConfig2d,
     /// If the padding is counted in the denominator when computing the average.
     pub count_include_pad: bool,
     /// If true, use ceiling instead of floor for output size calculation.
@@ -69,7 +69,7 @@ impl ModuleDisplay for AvgPool2d {
         content
             .add("kernel_size", &alloc::format!("{:?}", &self.kernel_size))
             .add("stride", &alloc::format!("{:?}", &self.stride))
-            .add("padding", &self.padding)
+            .add_debug_attribute("padding", &self.padding)
             .add("count_include_pad", &self.count_include_pad)
             .add("ceil_mode", &self.ceil_mode)
             .optional()
@@ -82,7 +82,7 @@ impl AvgPool2dConfig {
         AvgPool2d {
             stride: self.strides,
             kernel_size: self.kernel_size,
-            padding: Ignored(self.padding.clone()),
+            padding: self.padding.clone(),
             count_include_pad: self.count_include_pad,
             ceil_mode: self.ceil_mode,
         }
@@ -98,7 +98,7 @@ impl AvgPool2d {
     ///
     /// - input: `[batch_size, channels, height_in, width_in]`
     /// - output: `[batch_size, channels, height_out, width_out]`
-    pub fn forward<B: Backend>(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(&self, input: Tensor<4>) -> Tensor<4> {
         let [_batch_size, _channels_in, height_in, width_in] = input.dims();
 
         // Calculate padding as pairs - handles Same, Valid, and Explicit uniformly
@@ -141,7 +141,6 @@ impl AvgPool2d {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TestBackend;
     use rstest::rstest;
 
     #[test]
@@ -153,7 +152,7 @@ mod tests {
         let pool = config.init();
 
         // Input: [batch=1, channels=2, height=5, width=5]
-        let input = Tensor::<TestBackend, 4>::ones([1, 2, 5, 5], &device);
+        let input = Tensor::<4>::ones([1, 2, 5, 5], &device);
         let output = pool.forward(input);
 
         // Same padding should preserve spatial dimensions
@@ -195,7 +194,7 @@ mod tests {
         let pool = config.init();
 
         // Input: [batch=1, channels=2, height=4, width=5]
-        let input = Tensor::<TestBackend, 4>::ones([1, 2, 4, 5], &device);
+        let input = Tensor::<4>::ones([1, 2, 4, 5], &device);
         let output = pool.forward(input);
 
         // Height: 4 + 1 + 3 = 8, output = (8 - 3) / 1 + 1 = 6
@@ -213,7 +212,7 @@ mod tests {
         let pool = config.init();
 
         // Input: [batch=1, channels=2, height=4, width=5]
-        let input = Tensor::<TestBackend, 4>::ones([1, 2, 4, 5], &device);
+        let input = Tensor::<4>::ones([1, 2, 4, 5], &device);
         let output = pool.forward(input);
 
         // Height: 4 + 2 + 2 = 8, output = (8 - 3) / 1 + 1 = 6

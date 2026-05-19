@@ -1,19 +1,19 @@
 use alloc::vec::Vec;
-use burn_backend::backend::{Backend, ExecutionError};
+use burn_backend::backend::ExecutionError;
+use burn_std::{BoolDType, FloatDType};
 
 use crate::{BackendRouter, RunnerChannel, RunnerClient, get_client};
-use burn_backend::tensor::{
-    BoolTensor, Device, FloatElem, FloatTensor, IndexingUpdateOp, IntElem, IntTensor,
-};
+use burn_backend::tensor::{BoolTensor, Device, FloatTensor, IndexingUpdateOp, IntElem, IntTensor};
 use burn_backend::{
     Distribution, Element, IntDType, Scalar, Shape, Slice, TensorData, ops::IntTensorOps,
 };
 use burn_ir::{
     BaseOperationIr, BinaryOpIr, CastOpIr, CatOpIr, ClampOpIr, CreationOpIr, DimOpIr, FlipOpIr,
-    GatherOpIr, InitOperationIr, IntOperationIr, MaskFillOpIr, MaskWhereOpIr, MatmulOpIr,
-    NumericOperationIr, OperationIr, OperationOutput, PermuteOpIr, RandomOpIr, ReduceDimOpIr,
-    ReduceDimWithIndicesOpIr, ReduceOpIr, RepeatDimOpIr, ScalarOpIr, ScatterOpIr, SelectAssignOpIr,
-    SelectOpIr, ShapeOpIr, SliceAssignOpIr, SliceOpIr, SwapDimsOpIr, UnaryOpIr, UnfoldOpIr,
+    GatherNdOpIr, GatherOpIr, InitOperationIr, IntOperationIr, MaskFillOpIr, MaskWhereOpIr,
+    MatmulOpIr, NumericOperationIr, OperationIr, OperationOutput, PermuteOpIr, RandomOpIr,
+    ReduceDimOpIr, ReduceDimWithIndicesOpIr, ReduceOpIr, RepeatDimOpIr, ScalarOpIr, ScatterNdOpIr,
+    ScatterOpIr, SelectAssignOpIr, SelectOpIr, ShapeOpIr, SliceAssignOpIr, SliceOpIr, SwapDimsOpIr,
+    UnaryOpIr, UnfoldOpIr,
 };
 
 impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
@@ -31,7 +31,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .into_data()
             .await?
             // Since underlying backends can have different data types, we convert to the current elem
-            .convert::<<Self as Backend>::IntElem>())
+            .convert::<IntElem<Self>>())
     }
 
     fn int_from_data(data: TensorData, device: &Device<Self>) -> IntTensor<Self> {
@@ -172,6 +172,37 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
+    fn int_scatter_nd(
+        data: IntTensor<Self>,
+        indices: IntTensor<Self>,
+        values: IntTensor<Self>,
+        reduction: IndexingUpdateOp,
+    ) -> IntTensor<Self> {
+        let client = data.client.clone();
+        let desc = ScatterNdOpIr::create(
+            data.into_ir(),
+            indices.into_ir(),
+            values.into_ir(),
+            reduction,
+            || client.create_empty_handle(),
+        );
+
+        client
+            .register(OperationIr::BaseInt(BaseOperationIr::ScatterNd(desc)))
+            .output()
+    }
+
+    fn int_gather_nd(data: IntTensor<Self>, indices: IntTensor<Self>) -> IntTensor<Self> {
+        let client = data.client.clone();
+        let desc = GatherNdOpIr::create(data.into_ir(), indices.into_ir(), || {
+            client.create_empty_handle()
+        });
+
+        client
+            .register(OperationIr::BaseInt(BaseOperationIr::GatherNd(desc)))
+            .output()
+    }
+
     fn int_select(
         tensor: IntTensor<Self>,
         dim: usize,
@@ -218,24 +249,26 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_equal(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> BoolTensor<Self> {
+    fn int_equal(
+        lhs: IntTensor<Self>,
+        rhs: IntTensor<Self>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
-        let desc = BinaryOpIr::create_comparison(
-            lhs.into_ir(),
-            rhs.into_ir(),
-            R::BoolElem::dtype(),
-            || client.create_empty_handle(),
-        );
+        let desc =
+            BinaryOpIr::create_comparison(lhs.into_ir(), rhs.into_ir(), out_dtype.into(), || {
+                client.create_empty_handle()
+            });
 
         client
             .register(OperationIr::BaseInt(BaseOperationIr::Equal(desc)))
             .output()
     }
 
-    fn int_equal_elem(lhs: IntTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+    fn int_equal_elem(lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self> {
         let client = lhs.client.clone();
         let rhs = rhs.into();
-        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, R::BoolElem::dtype(), || {
+        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -244,14 +277,16 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_greater(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> BoolTensor<Self> {
+    fn int_greater(
+        lhs: IntTensor<Self>,
+        rhs: IntTensor<Self>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
-        let desc = BinaryOpIr::create_comparison(
-            lhs.into_ir(),
-            rhs.into_ir(),
-            R::BoolElem::dtype(),
-            || client.create_empty_handle(),
-        );
+        let desc =
+            BinaryOpIr::create_comparison(lhs.into_ir(), rhs.into_ir(), out_dtype.into(), || {
+                client.create_empty_handle()
+            });
 
         client
             .register(OperationIr::NumericInt(
@@ -261,10 +296,14 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_greater_elem(lhs: IntTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+    fn int_greater_elem(
+        lhs: IntTensor<Self>,
+        rhs: Scalar,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
         let rhs = rhs.into();
-        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, R::BoolElem::dtype(), || {
+        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -276,14 +315,16 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_greater_equal(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> BoolTensor<Self> {
+    fn int_greater_equal(
+        lhs: IntTensor<Self>,
+        rhs: IntTensor<Self>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
-        let desc = BinaryOpIr::create_comparison(
-            lhs.into_ir(),
-            rhs.into_ir(),
-            R::BoolElem::dtype(),
-            || client.create_empty_handle(),
-        );
+        let desc =
+            BinaryOpIr::create_comparison(lhs.into_ir(), rhs.into_ir(), out_dtype.into(), || {
+                client.create_empty_handle()
+            });
 
         client
             .register(OperationIr::NumericInt(
@@ -293,10 +334,14 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_greater_equal_elem(lhs: IntTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+    fn int_greater_equal_elem(
+        lhs: IntTensor<Self>,
+        rhs: Scalar,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
         let rhs = rhs.into();
-        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, R::BoolElem::dtype(), || {
+        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -308,14 +353,16 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_lower(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> BoolTensor<Self> {
+    fn int_lower(
+        lhs: IntTensor<Self>,
+        rhs: IntTensor<Self>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
-        let desc = BinaryOpIr::create_comparison(
-            lhs.into_ir(),
-            rhs.into_ir(),
-            R::BoolElem::dtype(),
-            || client.create_empty_handle(),
-        );
+        let desc =
+            BinaryOpIr::create_comparison(lhs.into_ir(), rhs.into_ir(), out_dtype.into(), || {
+                client.create_empty_handle()
+            });
 
         client
             .register(OperationIr::NumericInt(
@@ -325,10 +372,10 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_lower_elem(lhs: IntTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+    fn int_lower_elem(lhs: IntTensor<Self>, rhs: Scalar, out_dtype: BoolDType) -> BoolTensor<Self> {
         let client = lhs.client.clone();
         let rhs = rhs.into();
-        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, R::BoolElem::dtype(), || {
+        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -340,14 +387,16 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_lower_equal(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> BoolTensor<Self> {
+    fn int_lower_equal(
+        lhs: IntTensor<Self>,
+        rhs: IntTensor<Self>,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
-        let desc = BinaryOpIr::create_comparison(
-            lhs.into_ir(),
-            rhs.into_ir(),
-            R::BoolElem::dtype(),
-            || client.create_empty_handle(),
-        );
+        let desc =
+            BinaryOpIr::create_comparison(lhs.into_ir(), rhs.into_ir(), out_dtype.into(), || {
+                client.create_empty_handle()
+            });
 
         client
             .register(OperationIr::NumericInt(
@@ -357,10 +406,14 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_lower_equal_elem(lhs: IntTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+    fn int_lower_equal_elem(
+        lhs: IntTensor<Self>,
+        rhs: Scalar,
+        out_dtype: BoolDType,
+    ) -> BoolTensor<Self> {
         let client = lhs.client.clone();
         let rhs = rhs.into();
-        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, R::BoolElem::dtype(), || {
+        let desc = ScalarOpIr::create_comparison(lhs.into_ir(), rhs, out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -539,7 +592,8 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_sum_dim(tensor: IntTensor<Self>, axis: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), axis, || client.create_empty_handle());
+        let desc =
+            ReduceDimOpIr::create(tensor.into_ir(), axis, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -563,7 +617,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_prod_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -587,7 +641,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_mean_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -647,7 +701,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_argmax(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -657,9 +711,33 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
+    fn int_argtopk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self> {
+        let client = tensor.client.clone();
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, k, || client.create_empty_handle());
+
+        client
+            .register(OperationIr::NumericInt(
+                desc.out.dtype,
+                NumericOperationIr::ArgTopK(desc),
+            ))
+            .output()
+    }
+
+    fn int_topk(tensor: IntTensor<Self>, dim: usize, k: usize) -> IntTensor<Self> {
+        let client = tensor.client.clone();
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, k, || client.create_empty_handle());
+
+        client
+            .register(OperationIr::NumericInt(
+                desc.out.dtype,
+                NumericOperationIr::TopK(desc),
+            ))
+            .output()
+    }
+
     fn int_argmin(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -695,9 +773,9 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
             .output()
     }
 
-    fn int_into_float(tensor: IntTensor<Self>) -> FloatTensor<Self> {
+    fn int_into_float(tensor: IntTensor<Self>, out_dtype: FloatDType) -> FloatTensor<Self> {
         let client = tensor.client.clone();
-        let desc = CastOpIr::create(tensor.into_ir(), FloatElem::<Self>::dtype(), || {
+        let desc = CastOpIr::create(tensor.into_ir(), out_dtype.into(), || {
             client.create_empty_handle()
         });
 
@@ -731,7 +809,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_max_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -776,7 +854,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_max_abs_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -800,7 +878,7 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
     fn int_min_dim(tensor: IntTensor<Self>, dim: usize) -> IntTensor<Self> {
         let client = tensor.client.clone();
-        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, || client.create_empty_handle());
+        let desc = ReduceDimOpIr::create(tensor.into_ir(), dim, 1, || client.create_empty_handle());
 
         client
             .register(OperationIr::NumericInt(
@@ -835,9 +913,10 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
         shape: Shape,
         distribution: Distribution,
         device: &Device<Self>,
+        dtype: IntDType,
     ) -> IntTensor<Self> {
         let client = get_client::<R>(device);
-        let dtype = IntElem::<Self>::dtype();
+        let dtype = dtype.into();
         let desc = RandomOpIr::create(shape, dtype, distribution, || client.create_empty_handle());
 
         client
@@ -1032,6 +1111,33 @@ impl<R: RunnerChannel> IntTensorOps<Self> for BackendRouter<R> {
 
         client
             .register(OperationIr::BaseInt(BaseOperationIr::Unfold(desc)))
+            .output()
+    }
+
+    fn int_powi(lhs: IntTensor<Self>, rhs: IntTensor<Self>) -> IntTensor<Self> {
+        let client = lhs.client.clone();
+        let desc = BinaryOpIr::create(lhs.into_ir(), rhs.into_ir(), || {
+            client.create_empty_handle()
+        });
+
+        client
+            .register(OperationIr::NumericInt(
+                desc.out.dtype,
+                NumericOperationIr::Powi(desc),
+            ))
+            .output()
+    }
+
+    fn int_powi_scalar_impl(lhs: IntTensor<Self>, rhs: Scalar) -> IntTensor<Self> {
+        let client = lhs.client.clone();
+        let rhs = rhs.into();
+        let desc = ScalarOpIr::create(lhs.into_ir(), rhs, || client.create_empty_handle());
+
+        client
+            .register(OperationIr::NumericInt(
+                desc.out.dtype,
+                NumericOperationIr::PowiScalar(desc),
+            ))
             .output()
     }
 }

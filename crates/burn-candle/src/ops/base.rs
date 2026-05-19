@@ -9,14 +9,26 @@ use burn_backend::{
     BackTrace, Backend, Distribution, ExecutionError, Slice, bf16, f16,
     ops::unfold::{calculate_unfold_shape, calculate_unfold_windows},
 };
-use burn_backend::{Element, Shape, TensorData, TensorMetadata};
+use burn_backend::{DType, Element, Shape, TensorData, TensorMetadata};
 use candle_core::{Layout, WithDType};
 
 use super::tensor;
 
-pub fn cpu_random<E: CandleElement>(shape: Shape, distribution: Distribution) -> TensorData {
+pub fn cpu_random(shape: Shape, distribution: Distribution, dtype: DType) -> TensorData {
     let mut rng = crate::get_seeded_rng();
-    let data = TensorData::random::<E, _, _>(shape, distribution, &mut rng);
+    let data = match dtype {
+        DType::F64 => TensorData::random::<f64, _, _>(shape, distribution, &mut rng),
+        DType::F32 => TensorData::random::<f32, _, _>(shape, distribution, &mut rng),
+        DType::Flex32 => TensorData::random::<f32, _, _>(shape, distribution, &mut rng),
+        DType::F16 => TensorData::random::<burn_backend::f16, _, _>(shape, distribution, &mut rng),
+        DType::BF16 => {
+            TensorData::random::<burn_backend::bf16, _, _>(shape, distribution, &mut rng)
+        }
+        DType::I64 => TensorData::random::<i64, _, _>(shape, distribution, &mut rng),
+        DType::U32 => TensorData::random::<u32, _, _>(shape, distribution, &mut rng),
+        DType::U8 => TensorData::random::<u8, _, _>(shape, distribution, &mut rng),
+        other => unimplemented!("DType not supported {dtype:?}"),
+    };
     crate::set_seeded_rng(rng);
     data
 }
@@ -68,6 +80,117 @@ pub fn to_device(tensor: CandleTensor, device: &CandleDevice) -> CandleTensor {
 
 pub fn empty(shape: Shape, device: &CandleDevice, dtype: candle_core::DType) -> CandleTensor {
     zeros(shape, device, dtype)
+}
+
+/// Flatten K-dimensional index tuples into 1D linear offsets.
+///
+/// `indices` has shape `[num_updates, k]` (i64).
+/// Returns a 1D tensor of shape `[num_updates * slice_size]` (u32, for candle index ops).
+fn flatten_nd_indices(
+    indices: &candle_core::Tensor,
+    data_shape: &[usize],
+    k: usize,
+    slice_size: usize,
+) -> candle_core::Result<candle_core::Tensor> {
+    let device = indices.device();
+    let num_updates = indices.dim(0)?;
+
+    // Compute per-dimension strides for the first K dims
+    let mut strides = vec![0i64; k];
+    if k > 0 {
+        strides[k - 1] = slice_size as i64;
+        for i in (0..k - 1).rev() {
+            strides[i] = strides[i + 1] * data_shape[i + 1] as i64;
+        }
+    }
+
+    let strides_tensor = candle_core::Tensor::from_slice(&strides, (k,), device)?;
+    // base_offsets: [num_updates] = indices @ strides
+    let base_offsets = indices
+        .to_dtype(candle_core::DType::I64)?
+        .matmul(&strides_tensor.unsqueeze(1)?)?
+        .squeeze(1)?;
+
+    // Expand to [num_updates, slice_size] + intra-slice offsets
+    let slice_offsets = candle_core::Tensor::arange(0i64, slice_size as i64, device)?;
+    base_offsets
+        .unsqueeze(1)?
+        .broadcast_add(&slice_offsets.unsqueeze(0)?)?
+        .reshape((num_updates * slice_size,))?
+        .to_dtype(candle_core::DType::U32)
+}
+
+pub fn scatter_nd(
+    data: CandleTensor,
+    indices: CandleTensor,
+    values: CandleTensor,
+    reduction: burn_backend::tensor::IndexingUpdateOp,
+) -> CandleTensor {
+    try_scatter_nd(data, indices, values, reduction)
+        .unwrap_or_else(|e| panic!("candle scatter_nd: {e}"))
+}
+
+fn try_scatter_nd(
+    data: CandleTensor,
+    indices: CandleTensor,
+    values: CandleTensor,
+    reduction: burn_backend::tensor::IndexingUpdateOp,
+) -> candle_core::Result<CandleTensor> {
+    use burn_backend::tensor::IndexingUpdateOp;
+
+    let data_shape: Vec<usize> = data.tensor.dims().to_vec();
+    let idx_shape: Vec<usize> = indices.tensor.dims().to_vec();
+    let m = idx_shape.len();
+    let k = idx_shape[m - 1];
+    let num_updates: usize = idx_shape[..m - 1].iter().product();
+    let total_elems: usize = data_shape.iter().product();
+    let slice_size: usize = data_shape[k..].iter().product();
+
+    let flat_indices = indices.tensor.reshape((num_updates, k))?;
+    let linear_idx = flatten_nd_indices(&flat_indices, &data_shape, k, slice_size)?;
+
+    let flat_data = data.tensor.contiguous()?.reshape(total_elems)?;
+    let flat_values = values
+        .tensor
+        .contiguous()?
+        .reshape(num_updates * slice_size)?;
+
+    let result = match reduction {
+        IndexingUpdateOp::Assign => flat_data.scatter(&linear_idx, &flat_values, 0)?,
+        IndexingUpdateOp::Add => flat_data.scatter_add(&linear_idx, &flat_values, 0)?,
+        _ => panic!(
+            "scatter_nd with {:?} reduction is not supported by the candle backend",
+            reduction
+        ),
+    };
+
+    Ok(CandleTensor::new(result.reshape(data_shape)?))
+}
+
+pub fn gather_nd(data: CandleTensor, indices: CandleTensor) -> CandleTensor {
+    try_gather_nd(data, indices).unwrap_or_else(|e| panic!("candle gather_nd: {e}"))
+}
+
+fn try_gather_nd(data: CandleTensor, indices: CandleTensor) -> candle_core::Result<CandleTensor> {
+    let data_shape: Vec<usize> = data.tensor.dims().to_vec();
+    let idx_shape: Vec<usize> = indices.tensor.dims().to_vec();
+    let m = idx_shape.len();
+    let k = idx_shape[m - 1];
+    let num_indices: usize = idx_shape[..m - 1].iter().product();
+    let total_elems: usize = data_shape.iter().product();
+    let slice_size: usize = data_shape[k..].iter().product();
+
+    let flat_indices = indices.tensor.reshape((num_indices, k))?;
+    let linear_idx = flatten_nd_indices(&flat_indices, &data_shape, k, slice_size)?;
+
+    let flat_data = data.tensor.contiguous()?.reshape(total_elems)?;
+    let gathered = flat_data.index_select(&linear_idx, 0)?;
+
+    // Output shape: idx_shape[..m-1] ++ data_shape[k..]
+    let mut out_shape: Vec<usize> = idx_shape[..m - 1].to_vec();
+    out_shape.extend_from_slice(&data_shape[k..]);
+
+    Ok(CandleTensor::new(gathered.reshape(out_shape)?))
 }
 
 pub fn zeros(shape: Shape, device: &CandleDevice, dtype: candle_core::DType) -> CandleTensor {

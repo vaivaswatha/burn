@@ -43,7 +43,7 @@
 //! - WGPU (WebGPU): Cross-Platform GPU Backend
 //! - Candle: Backend using the Candle bindings
 //! - LibTorch: Backend using the LibTorch bindings
-//! - NdArray: Backend using the NdArray primitive as data structure
+//! - Flex: Pure-Rust CPU backend (std, no_std, WebAssembly)
 //! - Autodiff: Backend decorator that brings backpropagation to any backend
 //! - Fusion: Backend decorator that brings kernel fusion to backends that support it
 //!
@@ -93,10 +93,13 @@
 //!   - `webgpu`: Makes available the `wgpu` backend with the WebGPU Shading Language (WGSL) compiler
 //!   - `vulkan`: Makes available the `wgpu` backend with the alternative SPIR-V compiler
 //!   - `cuda`: Makes available the CUDA backend
+//!   - `metal`: Makes available the Metal backend
 //!   - `rocm`: Makes available the ROCm backend
+//!   - `cpu`: Makes available the CubeCL CPU backend
 //!   - `candle`: Makes available the Candle backend
 //!   - `tch`: Makes available the LibTorch backend
-//!   - `ndarray`: Makes available the NdArray backend
+//!   - `flex`: Makes available the Flex backend (pure-Rust CPU, std/no_std/WASM)
+//!   - `ndarray`: Makes available the NdArray backend (legacy - prefer `flex` for new projects)
 //! - Backend specifications
 //!   - `accelerate`: If supported, Accelerate will be used
 //!   - `blas-netlib`: If supported, Blas Netlib will be use
@@ -112,7 +115,6 @@
 //!   - `std`: Activates the standard library (deactivate for no_std)
 //!   - `server`: Enables the remote server.
 //!   - `network`: Enables network utilities (currently, only a file downloader with progress bar)
-//!   - `experimental-named-tensor`: Enables named tensors (experimental)
 //!
 //! You can also check the details in sub-crates [`burn-core`](https://docs.rs/burn-core) and [`burn-train`](https://docs.rs/burn-train).
 
@@ -130,15 +132,8 @@ pub mod rl {
     pub use burn_rl::*;
 }
 
-/// Backend module.
-pub mod backend;
-
 #[cfg(feature = "server")]
 pub use burn_remote::server;
-
-/// Module for collective operations
-#[cfg(feature = "collective")]
-pub mod collective;
 
 /// Module for model storage and serialization
 #[cfg(feature = "store")]
@@ -151,30 +146,37 @@ pub mod nn {
     pub use burn_nn::*;
 }
 
+pub use burn_std::config::{BurnConfig, config as runtime_config};
+
 /// Optimizers module.
+#[cfg(feature = "optim")]
 pub mod optim {
     pub use burn_optim::*;
 }
 
 // For backward compat, `burn::lr_scheduler::*`
 /// Learning rate scheduler module.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "optim", feature = "std"))]
 pub mod lr_scheduler {
     pub use burn_optim::lr_scheduler::*;
 }
 // For backward compat, `burn::grad_clipping::*`
 /// Gradient clipping module.
+#[cfg(feature = "optim")]
 pub mod grad_clipping {
     pub use burn_optim::grad_clipping::*;
 }
-
-#[cfg(feature = "dispatch")]
-pub use burn_dispatch::*;
 
 /// CubeCL module re-export.
 #[cfg(feature = "cubecl")]
 pub mod cubecl {
     pub use cubecl::*;
+}
+
+#[cfg(feature = "vision")]
+/// Vision module.
+pub mod vision {
+    pub use burn_vision::*;
 }
 
 pub mod prelude {

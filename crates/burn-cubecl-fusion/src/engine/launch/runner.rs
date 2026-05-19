@@ -25,8 +25,8 @@ pub trait TraceRunner<R: Runtime>: Vectorization<R> {
     fn run<'a>(
         &'a self,
         client: &'a ComputeClient<R>,
-        inputs: GlobalArgsLaunch<'a, R>,
-        outputs: GlobalArgsLaunch<'a, R>,
+        inputs: GlobalArgsLaunch<R>,
+        outputs: GlobalArgsLaunch<R>,
         configs: &'a [FuseBlockConfig],
     ) -> Result<(), Self::Error>;
 }
@@ -71,14 +71,14 @@ pub trait Vectorization<R: Runtime> {
     #[allow(clippy::too_many_arguments)]
     fn vectorization<'a>(
         &self,
-        _context: &Context<'_, CubeFusionHandle<R>>,
+        _context: &Context<CubeFusionHandle<R>>,
         vectorizations: &mut BTreeMap<TensorId, Vect>,
         inputs: impl Iterator<Item = VectorizationHandle<'a, R>>,
         outputs: impl Iterator<Item = &'a TensorIr>,
         reshaped: impl Iterator<Item = (&'a TensorIr, &'a TensorIr, bool)>,
         swapped: impl Iterator<Item = (&'a TensorIr, &'a TensorIr, bool, &'a (usize, usize))>,
-        line_sizes: &[LineSize],
-        max: LineSize,
+        vector_sizes: &[VectorSize],
+        max: VectorSize,
         axis: VectorizationAxis,
     ) {
         vectorization_default(
@@ -87,7 +87,7 @@ pub trait Vectorization<R: Runtime> {
             outputs,
             reshaped,
             swapped,
-            line_sizes,
+            vector_sizes,
             &Default::default(),
             max,
             &axis,

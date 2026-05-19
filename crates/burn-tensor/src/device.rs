@@ -1,465 +1,372 @@
-use alloc::format;
-use alloc::string::String;
-use burn_backend::{Backend, Device, DeviceId, DeviceOps};
-use burn_std::stub::RwLock;
-use burn_std::{DType, FloatDType, IntDType};
+pub use burn_dispatch::devices::*;
+pub use burn_std::{
+    DeviceError, DeviceSettings, ExecutionError, backtrace::BackTrace, device::DeviceId,
+};
 
-#[cfg(target_has_atomic = "ptr")]
-use alloc::sync::Arc;
+use burn_backend::Backend;
+#[allow(unused)]
+use burn_dispatch::DispatchDeviceId;
+use burn_dispatch::{Dispatch, DispatchDevice};
+use burn_std::FloatDType;
+use burn_std::IntDType;
+use burn_std::QuantScheme;
 
-#[cfg(not(target_has_atomic = "ptr"))]
-use portable_atomic_util::Arc;
-use thiserror::Error;
+use alloc::vec::Vec;
+use enumset::EnumSet;
+use enumset::EnumSetType;
 
-use core::any::TypeId;
-
-#[cfg(feature = "std")]
-pub use std::collections::HashMap;
-#[cfg(feature = "std")]
-use std::sync::LazyLock;
-
-#[cfg(not(feature = "std"))]
-pub use hashbrown::HashMap;
-#[cfg(not(feature = "std"))]
-use spin::Lazy as LazyLock;
-
-/// Policy controlling default device behavior.
+/// A high-level device handle for tensor operations.
 ///
-/// This includes default data types used for tensor creation.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct DevicePolicy {
-    /// Default floating-point data type for tensor creation.
-    float_dtype: Option<FloatDType>,
-    /// Default integer data type for tensor creation.
-    int_dtype: Option<IntDType>,
+/// [`Device`] provides a unified interface to interact with the underlying compute backend.
+///
+/// Autodiff support is a property of the device rather than a separate type parameter.
+#[cfg_attr(
+    feature = "autodiff",
+    doc = "Wrap a device with [`.autodiff()`](Device::autodiff) to enable automatic differentiation with the device."
+)]
+#[cfg_attr(
+    not(feature = "autodiff"),
+    doc = "Enable the `autodiff` feature to add automatic differentiation support to devices."
+)]
+///
+/// # Backend selection
+///
+/// Enable the desired backend via Cargo feature flags, then construct the corresponding
+/// backend device. You can use [`Device::new`], the [`From`]/[`Into`] trait,
+/// or [`Device::default()`] for the active backend's default device:
+///
+/// ```rust,ignore
+/// let device = Device::new(CudaDevice::default());
+///
+/// let device: Device = CudaDevice::default().into();
+///
+/// // Default device for whichever backend is enabled
+/// let device = Default::default();
+/// ```
+///
+/// # Autodiff
+///
+/// Requires `autodiff` feature.
+///
+/// Gradient computation is opt-in for a device:
+///
+/// ```rust,ignore
+/// let device = Device::default().autodiff();
+///
+/// // Tensors created on this device will track gradients
+/// let x = Tensor::<1>::from_floats([1.0, 2.0, 3.0], &device);
+/// ```
+#[derive(Clone, Default)]
+pub struct Device {
+    pub(crate) dispatch: DispatchDevice,
 }
 
-impl DevicePolicy {
-    /// Returns the default floating-point data type used for tensor creation.
-    pub(crate) fn float_dtype(&self) -> Option<FloatDType> {
-        self.float_dtype
-    }
-
-    /// Returns the default integer data type used for tensor creation.
-    pub(crate) fn int_dtype(&self) -> Option<IntDType> {
-        self.int_dtype
-    }
-
-    /// Sets the default floating-point data type.
-    pub(crate) fn set_float_dtype(&mut self, dtype: FloatDType) {
-        self.float_dtype = Some(dtype);
-    }
-
-    /// Sets the default integer data type.
-    pub(crate) fn set_int_dtype(&mut self, dtype: IntDType) {
-        self.int_dtype = Some(dtype);
+impl core::fmt::Debug for Device {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Device<{:?}>", self.dispatch)
     }
 }
 
-/// Key for the registry: physical device type + device id
-type RegistryKey = (DeviceId, TypeId);
-
-/// Global registry mapping devices to their policies.
-static REGISTRY: LazyLock<RwLock<HashMap<RegistryKey, Arc<DevicePolicy>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// Device policy management for controlling default tensor creation behavior.
-///
-/// # Policy Semantics
-///
-/// Device policies use snapshot semantics: when you retrieve a policy with
-/// [`get_device_policy`], you get an immutable snapshot of the current configuration.
-/// Updates to the policy (via [`set_default_dtypes`], [`set_default_float_dtype`], etc.)
-/// only affect future policy retrievals, not existing references.
-///
-/// This is intended for the common case where policies are set once during
-/// initialization and then read frequently during tensor creation.
-struct DevicePolicyRegistry;
-
-impl DevicePolicyRegistry {
-    /// Get the policy for a physical device type and device id.
+// Manually implement both `eq` and `ne` to add documentation on equality.
+#[allow(clippy::partialeq_ne_impl)]
+impl PartialEq for Device {
+    /// Compares devices based on hardware identity.
     ///
-    /// If no policy exists yet, a default one is created and stored.
-    fn get<D: DeviceOps>(device: &D) -> Arc<DevicePolicy> {
-        let key = Self::key(device);
-
-        if let Some(policy) = REGISTRY.read().unwrap().get(&key) {
-            return Arc::clone(policy);
-        }
-
-        let mut map = REGISTRY.write().unwrap();
-        Arc::clone(
-            map.entry(key)
-                .or_insert_with(|| Arc::new(DevicePolicy::default())),
-        )
+    /// Returns `true` if both devices represent the same compute resource.
+    /// Note that this comparison ignores autodiff and checkpointing settings.
+    /// To check if two devices have identical capabilities, check [`Device::is_autodiff`].
+    fn eq(&self, other: &Self) -> bool {
+        self.dispatch == other.dispatch
     }
 
-    /// Mutate the policy for a given device.
-    fn update<D: DeviceOps>(device: &D, update_fn: impl FnOnce(&mut DevicePolicy)) {
-        let key = Self::key(device);
-        let mut map = REGISTRY.write().unwrap();
-
-        let policy = map
-            .entry(key)
-            .or_insert_with(|| Arc::new(DevicePolicy::default()));
-
-        // Update the policy
-        let policy_mut = Arc::make_mut(policy);
-        update_fn(policy_mut);
-    }
-
-    /// Returns the device registry key.
-    fn key<D: Device>(device: &D) -> RegistryKey {
-        (device.to_id(), TypeId::of::<D>())
+    /// Compares devices based on hardware identity.
+    ///
+    /// Returns `false` if both devices represent the same compute resource,
+    /// even if one has autodiff enabled and the other does not.
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
     }
 }
 
-/// Get the [`device`'s policy](DevicePolicy).
-///
-/// Returns an immutable snapshot of the device's current policy. If the policy
-/// is updated after retrieval, this snapshot will not reflect those changes.
-pub(crate) fn get_device_policy<D: DeviceOps>(device: &D) -> Arc<DevicePolicy> {
-    DevicePolicyRegistry::get(device)
+impl Eq for Device {}
+
+impl<D: Into<DispatchDevice>> From<D> for Device {
+    fn from(device: D) -> Self {
+        Self::new(device)
+    }
 }
 
-/// Errors that can occur during device-related operations.
-///
-/// This covers errors related to hardware capability mismatches, such as
-/// requesting a data type not supported by the device, and configuration
-/// errors like attempting to change a policy in an invalid context.
-#[derive(Debug, Error)]
-pub enum DeviceError {
-    /// Unsupported data type by the device.
-    #[error("Device {device} does not support the requested data type {dtype:?}")]
-    UnsupportedDType {
-        /// The string representation of the device.
-        device: String,
-        /// The data type that caused the error.
-        dtype: DType,
-    },
-    // TODO: `InvalidContext` if a device policy cannot be changed after init / during training / etc.
-}
-
-impl DeviceError {
-    /// Helper to create a [`DeviceError::UnsupportedDType`] from any device.
-    pub fn unsupported_dtype<D: DeviceOps>(device: &D, dtype: DType) -> Self {
-        Self::UnsupportedDType {
-            device: format!("{device:?}"),
-            dtype,
+impl Device {
+    /// Creates a new [`Device`] from a supported backend device.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Device::new(CudaDevice::default());
+    /// ```
+    pub fn new(device: impl Into<DispatchDevice>) -> Self {
+        Self {
+            dispatch: device.into(),
         }
     }
-}
 
-fn check_dtype_support<B: Backend>(
-    device: &B::Device,
-    dtype: impl Into<DType>,
-) -> Result<(), DeviceError> {
-    let dtype = dtype.into();
-    // Default dtypes should have `DTypeUsage::general()`. Types restricted to specialized
-    // operations should not be used as default.
-    if B::supports_dtype(device, dtype) {
-        Ok(())
-    } else {
-        Err(DeviceError::unsupported_dtype(device, dtype))
-    }
-}
+    /// Enables autodiff on this device.
+    ///
+    /// Autodiff is a property of the device: tensors created on the returned device
+    /// will participate in the autodiff graph.
+    ///
+    /// Only first-order autodiff is supported. Calling this method on a device that
+    /// already has autodiff enabled will panic.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Device::default().autodiff();
+    /// let x = Tensor::<1>::from_floats([1.0, 2.0, 3.0], &device);
+    /// // x.backward() is now available
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if autodiff is already enabled on this device.
+    #[cfg(feature = "autodiff")]
+    pub fn autodiff(mut self) -> Self {
+        match self.dispatch {
+            DispatchDevice::Autodiff(_) => unimplemented!("Only first-order autodiff is supported"),
+            other => self.dispatch = DispatchDevice::autodiff(other),
+        }
 
-/// Sets the default data types for the device.
-///
-/// This updates the device's default data types used for tensor creation.
-/// The policy should typically be set once during initialization and then
-/// remains global for all subsequent operations on that device.
-///
-/// # Example
-///
-/// ```rust
-/// use burn_tensor::backend::Backend;
-/// use burn_tensor::{DType, Int, Tensor, set_default_dtypes};
-///
-/// fn example<B: Backend>() {
-///     let device = B::Device::default();
-///     
-///     // Update the device policy
-///     set_default_dtypes::<B>(&device, DType::F16, DType::I32);
-///     
-///     // All float tensors created after this will use F16 by default
-///     let tensor = Tensor::<B, 2>::zeros([2, 3], &device);
-///     // All int tensors created after this will use I32 default
-///     let tensor = Tensor::<B, 2, Int>::zeros([2, 3], &device);
-/// }
-/// ```
-pub fn set_default_dtypes<B: Backend>(
-    device: &B::Device,
-    float_dtype: impl Into<FloatDType>,
-    int_dtype: impl Into<IntDType>,
-) -> Result<(), DeviceError> {
-    let float_dtype = float_dtype.into();
-    let int_dtype = int_dtype.into();
-    check_dtype_support::<B>(device, float_dtype)?;
-    check_dtype_support::<B>(device, int_dtype)?;
-
-    set_default_dtypes_unchecked(device, float_dtype, int_dtype);
-    Ok(())
-}
-
-/// Sets the default floating-point data type for the device.
-///
-/// This updates the device's default data types used for tensor creation.
-/// The policy should typically be set once during initialization and then
-/// remains global for all subsequent operations on that device.
-///
-/// # Example
-///
-/// ```rust
-/// use burn_tensor::backend::Backend;
-/// use burn_tensor::{DType, Tensor, set_default_float_dtype};
-///
-/// fn example<B: Backend>() {
-///     let device = B::Device::default();
-///     
-///     // Update the device policy
-///     set_default_float_dtype::<B>(&device, DType::F16);
-///     
-///     // All float tensors created after this will use F16 by default
-///     let tensor = Tensor::<B, 2>::zeros([2, 3], &device);
-/// }
-/// ```
-pub fn set_default_float_dtype<B: Backend>(
-    device: &B::Device,
-    dtype: impl Into<FloatDType>,
-) -> Result<(), DeviceError> {
-    let dtype = dtype.into();
-    check_dtype_support::<B>(device, dtype)?;
-
-    set_default_float_dtype_unchecked(device, dtype);
-    Ok(())
-}
-
-/// Sets the default integer data type for the device.
-///
-/// This updates the device's default data types used for tensor creation.
-/// The policy should typically be set once during initialization and then
-/// remains global for all subsequent operations on that device.
-///
-/// # Example
-///
-/// ```rust
-/// use burn_tensor::backend::Backend;
-/// use burn_tensor::{DType, Int, Tensor, set_default_int_dtype};
-///
-/// fn example<B: Backend>() {
-///     let device = B::Device::default();
-///     
-///     // Update the device policy
-///     set_default_int_dtype::<B>(&device, DType::I32);
-///     
-///     // All int tensors created after this will use I32 default
-///     let tensor = Tensor::<B, 2, Int>::zeros([2, 3], &device);
-/// }
-/// ```
-pub fn set_default_int_dtype<B: Backend>(
-    device: &B::Device,
-    dtype: impl Into<IntDType>,
-) -> Result<(), DeviceError> {
-    let dtype = dtype.into();
-    check_dtype_support::<B>(device, dtype)?;
-
-    set_default_int_dtype_unchecked(device, dtype);
-    Ok(())
-}
-
-// Unchecked versions
-fn set_default_dtypes_unchecked<D: DeviceOps>(
-    device: &D,
-    float_dtype: FloatDType,
-    int_dtype: IntDType,
-) {
-    DevicePolicyRegistry::update(device, |p| {
-        p.set_float_dtype(float_dtype);
-        p.set_int_dtype(int_dtype);
-    });
-}
-
-fn set_default_float_dtype_unchecked<D: DeviceOps>(device: &D, dtype: FloatDType) {
-    DevicePolicyRegistry::update(device, |p| {
-        p.set_float_dtype(dtype);
-    });
-}
-
-fn set_default_int_dtype_unchecked<D: DeviceOps>(device: &D, dtype: IntDType) {
-    DevicePolicyRegistry::update(device, |p| {
-        p.set_int_dtype(dtype);
-    });
-}
-
-#[cfg(all(test, feature = "std"))]
-mod tests {
-    use serial_test::serial;
-
-    use super::*;
-
-    fn clear_registry() {
-        REGISTRY.write().unwrap().clear();
+        self
     }
 
-    #[derive(Clone, Debug, Default, PartialEq, new)]
-    pub struct TestDeviceA {
-        index: u32,
+    /// Enables gradient checkpointing on the autodiff device.
+    ///
+    /// Gradient checkpointing recomputes activations during backpropagation for operations
+    /// marked as memory-bound, while compute-bound operations still cache their
+    /// output. This reduces peak memory usage at the cost of additional computation
+    /// for memory-bound ops.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Device::default().autodiff().gradient_checkpointing();
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if autodiff is not enabled on this device.
+    #[cfg(feature = "autodiff")]
+    pub fn gradient_checkpointing(mut self) -> Self {
+        match self.dispatch {
+            DispatchDevice::Autodiff(device) => {
+                use burn_dispatch::CheckpointingStrategy;
+
+                self.dispatch = DispatchDevice::autodiff_checkpointed(
+                    device.inner(),
+                    CheckpointingStrategy::Balanced,
+                )
+            }
+            _ => panic!("Autodiff is not enabled on this device"),
+        }
+
+        self
     }
 
-    impl Device for TestDeviceA {
-        fn from_id(device_id: DeviceId) -> Self {
-            Self {
-                index: device_id.index_id,
+    /// Returns the underlying device, removing the autodiff capability if present.
+    ///
+    /// If autodiff is not enabled, this method returns the device as-is.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Device::default().autodiff();
+    /// let inner_device = device.inner();
+    ///
+    /// assert!(!inner_device.is_autodiff());
+    /// ```
+    pub fn inner(mut self) -> Self {
+        if self.is_autodiff() {
+            self.dispatch = self.dispatch.inner();
+        }
+
+        self
+    }
+
+    /// Synchronize the device, waiting for all pending operations to complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExecutionError`] if an operation failed to execute.
+    pub fn sync(&self) -> Result<(), ExecutionError> {
+        Dispatch::sync(&self.dispatch)
+    }
+
+    /// Seeds the random number generator for this device.
+    ///
+    /// Seeding before tensor operations that involve randomness (e.g. [`Tensor::random`](crate::Tensor::random))
+    /// makes those operations reproducible in a single-threaded program.
+    ///
+    /// # Note
+    ///
+    /// Depending on the backend, the seed may be applied globally rather than scoped
+    /// to this specific device. It is guaranteed that at least this device will be seeded.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Default::default();
+    /// device.seed(42);
+    /// let t = Tensor::<1>::random([8], Distribution::Default, &device);
+    /// ```
+    pub fn seed(&self, seed: u64) {
+        Dispatch::seed(&self.dispatch, seed)
+    }
+
+    /// Returns `true` if autodiff (gradient tracking) is enabled on this device.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Default::default();
+    /// assert!(!device.is_autodiff());
+    ///
+    /// let ad_device = device.autodiff();
+    /// assert!(ad_device.is_autodiff());
+    /// ```
+    pub fn is_autodiff(&self) -> bool {
+        Dispatch::ad_enabled(&self.dispatch)
+    }
+
+    /// Returns the default [quantization scheme](QuantScheme) for this device.
+    pub fn default_quant_scheme(&self) -> QuantScheme {
+        // TODO: maybe in device settings?
+        Dispatch::default_quant_scheme(&self.dispatch)
+    }
+
+    /// Sets the current allocation mode to persistent.
+    pub fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
+        &self,
+        input: Input,
+        func: Func,
+    ) -> Output {
+        Dispatch::memory_persistent_allocations(&self.dispatch, input, func)
+    }
+
+    /// Returns the [`DeviceSettings`] for this device.
+    ///
+    /// Settings include the default float and integer data types used when creating
+    /// tensors on this device.
+    ///
+    /// See [`set_default_dtypes`](Device::set_default_dtypes) to configure them.
+    pub fn settings(&self) -> DeviceSettings {
+        burn_backend::get_device_settings::<Dispatch>(&self.dispatch)
+    }
+
+    /// Sets the default float and integer data types for tensors created on this device.
+    ///
+    /// This configures the dtype used when no explicit type is specified at tensor
+    /// creation time.
+    ///
+    /// Settings can only be initialized once per device, and must happen before any
+    /// tensor is created on the device. The first tensor operation will lock the device
+    /// to its defaults, causing subsequent initializations attempt to return
+    /// [`DeviceError::AlreadyInitialized`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError::AlreadyInitialized`] if settings have already been set
+    /// for this device (either by a prior call or because a tensor operation has
+    /// already occurred).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let device = Default::default();
+    ///
+    /// device.set_default_dtypes(DType::F16, DType::I32)?;
+    ///
+    /// // Float tensors will now use F16
+    /// let floats = Tensor::<2>::zeros([2, 3], &device);
+    /// // Int tensors will now use I32
+    /// let ints = Tensor::<2, Int>::zeros([2, 3], &device);
+    /// ```
+    pub fn set_default_dtypes(
+        &mut self,
+        float_dtype: impl Into<FloatDType>,
+        int_dtype: impl Into<IntDType>,
+    ) -> Result<(), DeviceError> {
+        burn_backend::set_default_dtypes::<Dispatch>(&self.dispatch, float_dtype, int_dtype)
+    }
+
+    /// Retrieves all available [`Device`]s that match the given [`DeviceType`] filter.
+    pub fn enumerate(filter: impl Into<EnumSet<DeviceType>>) -> Vec<Device> {
+        #[allow(unused)]
+        let mut devices = Vec::new();
+
+        #[allow(clippy::never_loop)] // at least one backend is expected to be enabled.
+        for device_type in filter.into() {
+            #[allow(unused)]
+            let type_id = match device_type {
+                #[cfg(feature = "cpu")]
+                DeviceType::Cpu => DispatchDeviceId::Cpu,
+                #[cfg(feature = "cuda")]
+                DeviceType::Cuda => DispatchDeviceId::Cuda,
+                #[cfg(feature = "rocm")]
+                DeviceType::Rocm => DispatchDeviceId::Rocm,
+                #[cfg(any(
+                    feature = "wgpu",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "webgpu"
+                ))]
+                DeviceType::Wgpu => DispatchDeviceId::Wgpu,
+                #[cfg(feature = "flex")]
+                DeviceType::Flex => DispatchDeviceId::Flex,
+                #[cfg(feature = "ndarray")]
+                DeviceType::NdArray => DispatchDeviceId::NdArray,
+                #[cfg(feature = "tch")]
+                DeviceType::LibTorch => DispatchDeviceId::LibTorch,
+            };
+
+            #[allow(unreachable_code)] // need to have one backend enabled, so it is reachable
+            for device in Dispatch::enumerate(type_id) {
+                devices.push(Device::new(device))
             }
         }
 
-        fn to_id(&self) -> DeviceId {
-            DeviceId {
-                type_id: 0,
-                index_id: self.index,
-            }
-        }
-
-        fn device_count(_type_id: u16) -> usize {
-            1
-        }
+        devices
     }
+}
 
-    impl DeviceOps for TestDeviceA {}
+// TODO: this is essentially per-backend filter, we could have higher level filters e.g. Cpu (CpuDevice, Ndarray, Flex, LibTorchDevice::Cpu)
 
-    #[derive(Clone, Debug, Default, PartialEq, new)]
-    pub struct TestDeviceB {
-        index: u32,
-    }
-
-    impl Device for TestDeviceB {
-        fn from_id(device_id: DeviceId) -> Self {
-            Self {
-                index: device_id.index_id,
-            }
-        }
-
-        fn to_id(&self) -> DeviceId {
-            DeviceId {
-                type_id: 0,
-                index_id: self.index,
-            }
-        }
-
-        fn device_count(_type_id: u16) -> usize {
-            1
-        }
-    }
-
-    impl DeviceOps for TestDeviceB {}
-
-    #[test]
-    #[serial]
-    fn default_policy_is_created_and_shared() {
-        clear_registry(); // reset registry for each test
-
-        let device = TestDeviceA::new(0);
-
-        let p1 = get_device_policy(&device);
-        let p2 = get_device_policy(&device);
-
-        assert!(Arc::ptr_eq(&p1, &p2));
-        // Not explicitly set
-        assert!(p1.float_dtype().is_none());
-        assert!(p1.int_dtype().is_none());
-        assert!(p2.float_dtype().is_none());
-        assert!(p2.int_dtype().is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn updated_policy_is_shared() {
-        clear_registry(); // reset registry for each test
-
-        let device = TestDeviceA::new(0);
-
-        // The device policy is meant to be set once at initialization
-        set_default_dtypes_unchecked(&device, FloatDType::BF16, IntDType::I32);
-        let p1 = get_device_policy(&device);
-        let p2 = get_device_policy(&device);
-
-        assert!(Arc::ptr_eq(&p1, &p2));
-        assert_eq!(p1.float_dtype(), Some(FloatDType::BF16));
-        assert_eq!(p1.int_dtype(), Some(IntDType::I32));
-        assert_eq!(p2.float_dtype(), Some(FloatDType::BF16));
-        assert_eq!(p2.int_dtype(), Some(IntDType::I32));
-    }
-
-    #[test]
-    #[serial]
-    fn policy_is_device_id_specific() {
-        clear_registry(); // reset registry for each test
-
-        let d1 = TestDeviceA::new(0);
-        let d2 = TestDeviceA::new(1);
-
-        set_default_float_dtype_unchecked(&d1, FloatDType::F16);
-
-        let p1 = get_device_policy(&d1);
-        let p2 = get_device_policy(&d2);
-
-        assert!(!Arc::ptr_eq(&p1, &p2));
-        assert_eq!(p1.float_dtype(), Some(FloatDType::F16));
-        assert!(p1.int_dtype().is_none());
-        assert!(p2.float_dtype().is_none());
-        assert!(p2.int_dtype().is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn policy_is_device_type_specific() {
-        clear_registry(); // reset registry for each test
-
-        let d1 = TestDeviceA::new(0);
-        let d2 = TestDeviceB::new(0);
-
-        set_default_float_dtype_unchecked(&d2, FloatDType::F16);
-
-        let p1 = get_device_policy(&d1);
-        let p2 = get_device_policy(&d2);
-
-        assert!(p1.float_dtype().is_none());
-        assert!(p1.int_dtype().is_none());
-        assert_eq!(p2.float_dtype(), Some(FloatDType::F16));
-        assert!(p2.int_dtype().is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn updating_policy_should_not_affect_snapshot() {
-        clear_registry(); // reset registry for each test
-
-        // The device policy is meant to be set once at initialization
-        let device = TestDeviceA::new(0);
-        let before = get_device_policy(&device);
-
-        set_default_float_dtype_unchecked(&device, FloatDType::BF16);
-
-        let after = get_device_policy(&device);
-
-        assert!(!Arc::ptr_eq(&before, &after));
-        assert_eq!(after.float_dtype(), Some(FloatDType::BF16));
-        assert!(before.float_dtype().is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn set_default_dtypes_overwrites_fields() {
-        clear_registry(); // reset registry for each test
-
-        let device = TestDeviceA::new(0);
-
-        set_default_dtypes_unchecked(&device, FloatDType::F16, IntDType::I64);
-
-        let policy = get_device_policy(&device);
-
-        assert_eq!(policy.float_dtype(), Some(FloatDType::F16));
-        assert_eq!(policy.int_dtype(), Some(IntDType::I64));
-    }
+/// Represents the devices that can be used.
+///
+/// `DeviceType` is used to filter the available device types for [`Device::enumerate`].
+#[allow(missing_docs)]
+#[derive(Debug, EnumSetType)]
+pub enum DeviceType {
+    #[cfg(feature = "cpu")]
+    Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
+    #[cfg(feature = "rocm")]
+    Rocm,
+    #[cfg(any(
+        feature = "wgpu",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "webgpu"
+    ))]
+    Wgpu,
+    #[cfg(feature = "flex")]
+    Flex,
+    #[cfg(feature = "ndarray")]
+    NdArray,
+    #[cfg(feature = "tch")]
+    LibTorch,
 }

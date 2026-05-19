@@ -16,7 +16,7 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use burn_core::module::ParamId;
-use burn_tensor::{DType, TensorData};
+use burn_core::tensor::{BoolStore, DType, TensorData};
 use byteorder::{LittleEndian, ReadBytesExt};
 use half::{bf16, f16};
 use std::collections::HashMap;
@@ -447,7 +447,7 @@ fn storage_type_to_dtype(storage_type: &str) -> Result<DType> {
         "ShortStorage" => Ok(DType::I16),
         "CharStorage" => Ok(DType::I8),
         "ByteStorage" => Ok(DType::U8),
-        "BoolStorage" => Ok(DType::Bool),
+        "BoolStorage" => Ok(DType::Bool(BoolStore::Native)),
         _ => Err(PickleError::InvalidData(format!(
             "Unknown storage type: {}",
             storage_type
@@ -466,7 +466,7 @@ fn rebuild_tensor_impl(
 ) -> Result<Object> {
     // Parse the storage info to extract dtype and storage key
     // The persistent ID is typically a tuple like: ('storage', 'FloatStorage', '0', 'cpu', 4)
-    let (dtype, storage_key) = if let Some(tuple) = storage_tuple {
+    let (dtype, storage_key, storage_total_elements) = if let Some(tuple) = storage_tuple {
         // Direct tuple access
         if tuple.len() >= 3 {
             let storage_type = match &tuple[1] {
@@ -492,7 +492,12 @@ fn rebuild_tensor_impl(
                     )));
                 }
             };
-            (dtype, key)
+            // Extract total element count from index 4
+            let total_elements = match tuple.get(4) {
+                Some(Object::Int(n)) => Some(*n as usize),
+                _ => None,
+            };
+            (dtype, key, total_elements)
         } else {
             return Err(PickleError::InvalidData(format!(
                 "Storage tuple too short, expected at least 3 elements, got {}",
@@ -523,7 +528,7 @@ fn rebuild_tensor_impl(
 
             if parts.len() >= 3 {
                 let dtype = storage_type_to_dtype(parts[1])?;
-                (dtype, parts[2].to_string())
+                (dtype, parts[2].to_string(), None)
             } else {
                 return Err(PickleError::InvalidData(format!(
                     "Storage info tuple too short, expected at least 3 parts, got {}",
@@ -574,14 +579,19 @@ fn rebuild_tensor_impl(
         }
     };
 
-    // Track storage usage IMMEDIATELY for lazy boundary detection
-    // This must happen BEFORE creating the closure, not inside it!
+    // There is no guarantee that the storage size equals the python object size.
+    // The size of the object can be smaller than the storage (e.g., uncloned views
+    // of a tensor are saved to the .pt/.pth files). Thus, the actual storage size
+    // should be used, which can be computed using the total number of elements
+    // in the storage.
     if let LazyDataSource::LegacyMultiStorage(ref source) = *data_source {
         let source = source
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let num_elements: usize = shape.iter().product();
-        let bytes_needed = storage_offset * dtype.size() + num_elements * dtype.size();
+        let bytes_needed = match storage_total_elements {
+            Some(total) => total * dtype.size(),
+            None => (storage_offset + shape.iter().product::<usize>()) * dtype.size(),
+        };
         source.track_storage_usage(&storage_key, 0, bytes_needed);
     }
 
@@ -682,7 +692,7 @@ fn rebuild_tensor_impl(
                         values.resize(num_elements, 0);
                         Ok(TensorData::new(values, shape_clone.clone()))
                     }
-                    DType::Bool => {
+                    DType::Bool(BoolStore::Native) => {
                         let mut values = Vec::with_capacity(num_elements);
                         for &byte in data_slice.iter().take(elements_to_read) {
                             values.push(byte != 0);
@@ -818,7 +828,7 @@ fn rebuild_tensor_impl(
                         vec![0u64; num_elements],
                         shape_clone.clone(),
                     )),
-                    DType::Bool => Ok(TensorData::new(
+                    DType::Bool(BoolStore::Native) => Ok(TensorData::new(
                         vec![false; num_elements],
                         shape_clone.clone(),
                     )),
@@ -833,7 +843,7 @@ fn rebuild_tensor_impl(
             }
         }),
         dtype,
-        shape,
+        shape.into(),
         vec![],         // path_stack
         vec![],         // container_stack
         ParamId::new(), // tensor_id

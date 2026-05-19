@@ -1,7 +1,7 @@
 use burn::{
     nn::transformer::TransformerEncoderConfig,
     optim::{AdamConfig, decay::WeightDecayConfig},
-    tensor::backend::AutodiffBackend,
+    tensor::{DType, Device, Element},
 };
 
 use text_classification::{DbPediaDataset, training::ExperimentConfig};
@@ -12,14 +12,19 @@ type ElemType = f32;
 #[cfg(feature = "f16")]
 type ElemType = burn::tensor::f16;
 
-pub fn launch<B: AutodiffBackend>(devices: Vec<B::Device>) {
+pub fn launch(device: impl Into<Device>) {
     let config = ExperimentConfig::new(
         TransformerEncoderConfig::new(256, 1024, 8, 4).with_norm_first(true),
         AdamConfig::new().with_weight_decay(Some(WeightDecayConfig::new(5e-5))),
     );
 
-    text_classification::training::train::<B, DbPediaDataset>(
-        devices,
+    let mut device = device.into();
+    device
+        .set_default_dtypes(ElemType::dtype(), DType::I32)
+        .unwrap();
+
+    text_classification::training::train::<DbPediaDataset>(
+        burn::train::ExecutionStrategy::SingleDevice(device),
         DbPediaDataset::train(),
         DbPediaDataset::test(),
         config,
@@ -27,32 +32,18 @@ pub fn launch<B: AutodiffBackend>(devices: Vec<B::Device>) {
     );
 }
 
-#[cfg(any(
-    feature = "ndarray",
-    feature = "ndarray-blas-netlib",
-    feature = "ndarray-blas-openblas",
-    feature = "ndarray-blas-accelerate",
-))]
-mod ndarray {
-    use crate::{ElemType, launch};
-    use burn::backend::{
-        Autodiff,
-        ndarray::{NdArray, NdArrayDevice},
-    };
+#[cfg(feature = "flex")]
+mod flex {
+    use burn::backend::flex::FlexDevice;
 
     pub fn run() {
-        launch::<Autodiff<NdArray<ElemType>>>(vec![NdArrayDevice::Cpu]);
+        crate::launch(FlexDevice);
     }
 }
 
 #[cfg(feature = "tch-gpu")]
 mod tch_gpu {
-    use burn::backend::{
-        Autodiff,
-        libtorch::{LibTorch, LibTorchDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::backend::libtorch::LibTorchDevice;
 
     pub fn run() {
         #[cfg(not(target_os = "macos"))]
@@ -60,46 +51,31 @@ mod tch_gpu {
         #[cfg(target_os = "macos")]
         let device = LibTorchDevice::Mps;
 
-        launch::<Autodiff<LibTorch<ElemType>>>(vec![device]);
+        crate::launch(device);
     }
 }
 
 #[cfg(feature = "tch-cpu")]
 mod tch_cpu {
-    use burn::backend::{
-        Autodiff,
-        libtorch::{LibTorch, LibTorchDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::backend::libtorch::LibTorchDevice;
 
     pub fn run() {
-        launch::<Autodiff<LibTorch<ElemType>>>(vec![LibTorchDevice::Cpu]);
+        crate::launch(LibTorchDevice::Cpu);
     }
 }
 
 #[cfg(feature = "wgpu")]
 mod wgpu {
-    use burn::backend::{
-        Autodiff,
-        wgpu::{Wgpu, WgpuDevice},
-    };
-
-    use crate::{ElemType, launch};
+    use burn::backend::wgpu::WgpuDevice;
 
     pub fn run() {
-        launch::<Autodiff<Wgpu<ElemType, i32>>>(vec![WgpuDevice::default()]);
+        crate::launch(WgpuDevice::default());
     }
 }
 
 fn main() {
-    #[cfg(any(
-        feature = "ndarray",
-        feature = "ndarray-blas-netlib",
-        feature = "ndarray-blas-openblas",
-        feature = "ndarray-blas-accelerate",
-    ))]
-    ndarray::run();
+    #[cfg(feature = "flex")]
+    flex::run();
     #[cfg(feature = "tch-gpu")]
     tch_gpu::run();
     #[cfg(feature = "tch-cpu")]

@@ -7,9 +7,19 @@ use crate::{
     runtime::server::NodeCleaner,
     tensor::{AutodiffTensor, NodeRefCount},
 };
-use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+
+#[cfg(not(target_has_atomic = "ptr"))]
+use portable_atomic_util::Arc;
+
+#[cfg(not(feature = "distributed"))]
 use burn_backend::Backend;
+
+#[cfg(feature = "distributed")]
+use burn_backend::distributed::DistributedBackend;
 use hashbrown::{HashMap, HashSet};
 
 #[cfg(feature = "std")]
@@ -105,14 +115,33 @@ impl AutodiffClient for GraphMutexClient {
         state.server.register(node_id_ref, step, actions);
     }
 
+    #[cfg(not(feature = "distributed"))]
     fn backward<B: Backend>(&self, root: AutodiffTensor<B>) -> Gradients {
         let node_id = root.node.id;
         let graph = GraphMutexClient::graph(root.node.id, &[]);
 
-        let grads = Gradients::new::<B>(root.node, root.primitive);
         let grads = {
             let mut state = graph.state.lock();
-            state.server.backward::<GraphCleaner>(grads, node_id)
+            state
+                .server
+                .backward::<GraphCleaner, B>(root.node, root.primitive, node_id)
+        }; // lock released
+
+        GraphCleaner::cleanup_orphaned_entries();
+
+        grads
+    }
+
+    #[cfg(feature = "distributed")]
+    fn backward<B: DistributedBackend>(&self, root: AutodiffTensor<B>) -> Gradients {
+        let node_id = root.node.id;
+        let graph = GraphMutexClient::graph(root.node.id, &[]);
+
+        let grads = {
+            let mut state = graph.state.lock();
+            state
+                .server
+                .backward::<GraphCleaner, B>(root.node, root.primitive, node_id)
         }; // lock released
 
         GraphCleaner::cleanup_orphaned_entries();

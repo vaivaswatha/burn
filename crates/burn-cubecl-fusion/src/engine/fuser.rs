@@ -1,15 +1,18 @@
 use super::{
-    codegen::ir::{BinaryFuseArgs, FuseArg, FuseOp, FuseType, UnaryFuseArgs},
+    codegen::ir::{BinaryFuseArgs, FuseArg, FuseOp, UnaryFuseArgs},
     settings::FuseSettings,
     trace::{FuseTrace, TraceFuser, block::QuantInput},
 };
-use crate::engine::codegen::ir::QuantSchemeFuse;
+use crate::engine::{codegen::ir::QuantSchemeFuse, scoring::Scoring};
 use burn_fusion::{FuserProperties, FuserStatus, OperationFuser};
 use burn_ir::{
     BaseOperationIr, BinaryOpIr, FloatOperationIr, NumericOperationIr, OperationIr, ScalarOpIr,
     TensorIr, UnaryOpIr,
 };
-use burn_std::{DType, Shape};
+use burn_std::{
+    DType, Shape,
+    config::{fusion::FusionLogLevel, log_fusion},
+};
 use cubecl::ir::ElemType;
 
 /// The base operation fuser that can be used to fuse [all supported fuse operations](FuseOp).
@@ -27,7 +30,8 @@ use cubecl::ir::ElemType;
 /// to actually fuse the [FuseOp] when possible.
 #[derive(Debug, Clone)]
 pub(crate) struct TraceOperationFuser {
-    fuser: TryTraceFuser,
+    pub(crate) fuser: TryTraceFuser,
+    scoring: Scoring,
     pub(crate) settings: FuseSettings,
     pub(crate) current_output_shape: Shape,
     status: FuserStatus,
@@ -37,6 +41,25 @@ pub(crate) struct TraceOperationFuser {
 }
 
 impl TraceOperationFuser {
+    /// Emits a `Full`-level fusion log explaining why the fuser transitioned to `Closed`.
+    /// `prev_num_ops` is the number of ops already fused before the rejected op.
+    fn log_closed(&self, op: &OperationIr, prev_num_ops: usize, reason: &'static str) {
+        let max = self.max_bindings;
+        log_fusion(FusionLogLevel::Full, || {
+            // Debug-format the op and estimate bindings lazily: both are expensive
+            // enough to skip when logging is off.
+            let op_dbg = format!("{op:?}");
+            let op_short = op_dbg
+                .split_once('(')
+                .map(|(head, _)| head)
+                .unwrap_or(&op_dbg);
+            let est = self.fuser.fuser.estimate_bindings();
+            format!(
+                "[fuser] closed on {op_short} ({reason}); had {prev_num_ops} ops, est_bindings={est}/{max}"
+            )
+        });
+    }
+
     /// Checks if the [operation](OperationIr) can be fused with the current fuser.
     pub(crate) fn can_fuse(&self, op: &OperationIr) -> bool {
         let len_previous = self.len();
@@ -55,10 +78,15 @@ impl OperationFuser<FuseTrace> for TraceOperationFuser {
             return;
         }
 
+        // Capture state before the fuse attempt so we can log a useful reason
+        // if the fuser closes on this op.
+        let prev_num_ops = self.num_ops;
+
         match op {
             OperationIr::Drop(tensor) => {
                 if self.num_ops == 0 {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "drop on empty fuser");
                     return;
                 }
 
@@ -67,46 +95,54 @@ impl OperationFuser<FuseTrace> for TraceOperationFuser {
             OperationIr::BaseFloat(ops) => {
                 if !self.fuse_base(ops) {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "base fuse rejected");
                     return;
                 }
             }
             OperationIr::BaseInt(ops) => {
                 if !self.fuse_base(ops) {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "base fuse rejected");
                     return;
                 }
             }
             OperationIr::Float(_dtype, ops) => {
                 if !self.fuse_float(ops) {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "float fuse rejected");
                     return;
                 }
             }
             OperationIr::NumericFloat(_dtype, ops) => {
                 if !self.fuse_numeric(ops) {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "numeric fuse rejected");
                     return;
                 }
             }
             OperationIr::NumericInt(_dtype, ops) => {
                 if !self.fuse_numeric(ops) {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "numeric fuse rejected");
                     return;
                 }
             }
             OperationIr::BaseBool(ops) => {
                 if !self.fuse_base(ops) {
                     self.status = FuserStatus::Closed;
+                    self.log_closed(op, prev_num_ops, "base fuse rejected");
                     return;
                 }
             }
             _ => {
                 self.status = FuserStatus::Closed;
+                self.log_closed(op, prev_num_ops, "unsupported op variant");
                 return;
             }
         };
 
         self.status = FuserStatus::Open;
+        self.scoring.register(op);
         self.num_ops += 1;
     }
 
@@ -120,13 +156,10 @@ impl OperationFuser<FuseTrace> for TraceOperationFuser {
 
     fn reset(&mut self) {
         self.num_ops = 0;
+        self.scoring.reset();
         self.num_views = 0;
         self.status = FuserStatus::Open;
-        self.fuser = TryTraceFuser::new(
-            self.max_bindings,
-            self.fuser.fuser.bool_precision,
-            self.settings,
-        );
+        self.fuser = TryTraceFuser::new(self.max_bindings, self.settings);
         self.current_output_shape = Shape::new([]);
     }
 
@@ -136,11 +169,11 @@ impl OperationFuser<FuseTrace> for TraceOperationFuser {
 
     fn properties(&self) -> FuserProperties {
         let ready = self.num_ops > 0;
+        let score = self
+            .scoring
+            .evaluate(&self.fuser.clone().finish(self.current_output_shape.clone()));
 
-        FuserProperties {
-            ready,
-            score: self.num_ops as u64,
-        }
+        FuserProperties { ready, score }
     }
 
     fn clone_dyn(&self) -> Box<dyn OperationFuser<FuseTrace>> {
@@ -150,10 +183,11 @@ impl OperationFuser<FuseTrace> for TraceOperationFuser {
 
 impl TraceOperationFuser {
     /// Creates a new fuser.
-    pub fn new(max_bindings: u32, bool_precision: FuseType, settings: FuseSettings) -> Self {
+    pub fn new(max_bindings: u32, settings: FuseSettings) -> Self {
         Self {
-            fuser: TryTraceFuser::new(max_bindings, bool_precision, settings),
+            fuser: TryTraceFuser::new(max_bindings, settings),
             settings,
+            scoring: Scoring::default(),
             num_ops: 0,
             num_views: 0,
             max_bindings,
@@ -430,6 +464,9 @@ impl TraceOperationFuser {
             FloatOperationIr::Log(desc) => {
                 self.fuse_unary_ops(desc, |input, out| FuseOp::Log(UnaryFuseArgs { input, out }))
             }
+            FloatOperationIr::Powf(desc) => self.fuse_binary_ops(desc, |lhs, rhs, out| {
+                FuseOp::Powf(BinaryFuseArgs { lhs, rhs, out })
+            }),
             FloatOperationIr::Log1p(desc) => self.fuse_unary_ops(desc, |input, out| {
                 FuseOp::Log1p(UnaryFuseArgs { input, out })
             }),
@@ -565,9 +602,6 @@ impl TraceOperationFuser {
             }),
             NumericOperationIr::RemScalar(desc) => self.fuse_scalar_ops(desc, |lhs, rhs, out| {
                 FuseOp::Rem(BinaryFuseArgs { lhs, rhs, out })
-            }),
-            NumericOperationIr::Powf(desc) => self.fuse_binary_ops(desc, |lhs, rhs, out| {
-                FuseOp::Powf(BinaryFuseArgs { lhs, rhs, out })
             }),
             NumericOperationIr::Clamp(desc) => {
                 if !self.output_is_compatible(&desc.out) {
@@ -716,17 +750,17 @@ impl TraceOperationFuser {
 
 #[derive(Debug, Clone)]
 /// Builder wrapper to limit the number of bindings in generated kernels.
-struct TryTraceFuser {
-    fuser: TraceFuser,
+pub(crate) struct TryTraceFuser {
+    pub(crate) fuser: TraceFuser,
     max_bindings: u32,
     max_ops: u32,
     added_ops: bool,
 }
 
 impl TryTraceFuser {
-    fn new(max_bindings: u32, bool_precision: FuseType, settings: FuseSettings) -> Self {
+    fn new(max_bindings: u32, settings: FuseSettings) -> Self {
         Self {
-            fuser: TraceFuser::new(bool_precision, settings),
+            fuser: TraceFuser::new(settings),
             max_bindings,
             // A good default, avoid errors with for loops over only memory
             // bound operations.

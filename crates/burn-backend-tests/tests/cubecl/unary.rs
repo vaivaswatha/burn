@@ -1,15 +1,11 @@
 use super::*;
-use burn_tensor::Tensor;
 
 #[test]
 fn tanh_should_not_have_numerical_bugs_on_macos() {
     fn tanh_one_value(input: f32) -> f32 {
-        let tensor = Tensor::<TestBackend, 1>::ones([1], &Default::default()) * input;
-        let output = tensor.tanh().into_primitive();
-        Tensor::<TestBackend, 1>::from_primitive(output)
-            .into_data()
-            .as_slice()
-            .unwrap()[0]
+        let tensor = TestTensor::<1>::ones([1], &Default::default()) * input;
+        let output = tensor.tanh();
+        output.into_data().as_slice().unwrap()[0]
     }
 
     let ok = tanh_one_value(43.0); // metal tanh gives 1.0 which is the right answer

@@ -4,7 +4,7 @@ use crate::{
     stream::{Context, OrderedExecution},
 };
 use burn_backend::{
-    Backend, DType, DeviceOps, Element, ExecutionError,
+    Backend, BackendTypes, DType, DeviceOps, ExecutionError,
     tensor::{BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor},
 };
 use burn_ir::{BackendIr, OperationIr, TensorHandle};
@@ -22,7 +22,7 @@ pub struct Fusion<B: FusionBackend> {
     _backend: PhantomData<B>,
 }
 
-impl<B: FusionBackend> Backend for Fusion<B> {
+impl<B: FusionBackend> BackendTypes for Fusion<B> {
     type Device = B::Device;
 
     type FloatTensorPrimitive = FusionTensor<B::FusionRuntime>;
@@ -38,28 +38,34 @@ impl<B: FusionBackend> Backend for Fusion<B> {
     type BoolElem = B::BoolElem;
 
     type QuantizedTensorPrimitive = FusionTensor<B::FusionRuntime>;
+}
 
+impl<B: FusionBackend> Backend for Fusion<B> {
     fn name(device: &Self::Device) -> String {
         format!("fusion<{}>", B::name(device))
     }
 
     fn seed(device: &B::Device, seed: u64) {
         let client = GlobalFusionClient::<B::FusionRuntime>::load(device);
-        client.drain();
-        B::seed(device, seed);
+        let device = device.clone();
+        client.sync(move || B::seed(&device, seed));
     }
 
     fn sync(device: &Self::Device) -> Result<(), ExecutionError> {
         let client = GlobalFusionClient::<B::FusionRuntime>::load(device);
-        client.drain();
-        B::sync(device)
+        let device = device.clone();
+        client.sync(move || B::sync(&device))
     }
 
     fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
 
-    fn memory_persistent_allocations<Output, Input, Func: Fn(Input) -> Output>(
+    fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
         device: &Self::Device,
         input: Input,
         func: Func,
@@ -84,6 +90,10 @@ impl<B: FusionBackend> Backend for Fusion<B> {
 
     fn dtype_usage(device: &Self::Device, dtype: DType) -> burn_backend::DTypeUsageSet {
         B::dtype_usage(device, dtype)
+    }
+
+    fn device_count(type_id: u16) -> usize {
+        B::device_count(type_id)
     }
 }
 
@@ -146,16 +156,14 @@ pub trait NumOperations: core::fmt::Debug {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// The name of the optimization.
+    fn name(&self) -> &'static str;
 }
 
 /// The optimization created from a [fuser](OperationFuser).
 pub trait Optimization<R: FusionRuntime>: Send + NumOperations {
     /// Execute the optimization.
-    fn execute(
-        &mut self,
-        context: &mut Context<'_, R::FusionHandle>,
-        execution: &OrderedExecution<R>,
-    );
+    fn execute(&mut self, context: &mut Context<R::FusionHandle>, execution: &OrderedExecution<R>);
 
     /// Returns the state that can be serialized.
     fn to_state(&self) -> R::OptimizationState;
@@ -180,8 +188,6 @@ pub trait FusionRuntime: Send + Sync + Sized + core::fmt::Debug + 'static {
     type FusionHandle: Clone + Send;
     /// Device used by the runtime.
     type FusionDevice: DeviceOps;
-    /// The type that represents booleans on the backend.
-    type BoolRepr: Element;
 
     /// The list of fusers that will be used to optimize the computational graph.
     fn fusers(device: Self::FusionDevice) -> Vec<Box<dyn OperationFuser<Self::Optimization>>>;

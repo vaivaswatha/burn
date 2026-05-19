@@ -7,8 +7,9 @@ use burn::module::Initializer;
 use burn::module::Module;
 use burn::module::ModuleDisplay;
 use burn::module::Param;
+use burn::tensor::Device;
 use burn::tensor::Tensor;
-use burn::tensor::backend::Backend;
+use burn::tensor::module::layer_norm;
 
 /// Configuration to create a [LayerNorm](LayerNorm) layer using the [init function](LayerNormConfig::init).
 #[derive(Debug, Config)]
@@ -36,18 +37,18 @@ pub struct LayerNormConfig {
 /// Should be created using [LayerNormConfig](LayerNormConfig).
 #[derive(Module, Debug)]
 #[module(custom_display)]
-pub struct LayerNorm<B: Backend> {
+pub struct LayerNorm {
     /// The learnable weight (scale).
-    pub gamma: Param<Tensor<B, 1>>,
+    pub gamma: Param<Tensor<1>>,
     /// The learnable bias (optional).
-    pub beta: Option<Param<Tensor<B, 1>>>,
+    pub beta: Option<Param<Tensor<1>>>,
     /// A value required for numerical stability.
     epsilon: f64,
 }
 
 impl LayerNormConfig {
     /// Initialize a new [layer norm](LayerNorm) module.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> LayerNorm<B> {
+    pub fn init(&self, device: &Device) -> LayerNorm {
         let gamma = Initializer::Ones.init([self.d_model], device);
         let beta = if self.bias {
             Some(Initializer::Zeros.init([self.d_model], device))
@@ -63,7 +64,7 @@ impl LayerNormConfig {
     }
 }
 
-impl<B: Backend> LayerNorm<B> {
+impl LayerNorm {
     /// Applies the forward pass on the input tensor.
     ///
     /// See the [LayerNorm](LayerNorm) documentation for more information.
@@ -72,21 +73,17 @@ impl<B: Backend> LayerNorm<B> {
     ///
     /// - input: `[..., any, d_model]`
     /// - output: `[..., any, d_model]`
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        let (var, mean) = input.clone().var_mean_bias(D - 1);
-
-        let input_normalized = input.sub(mean).div(var.add_scalar(self.epsilon).sqrt());
-
-        let output = input_normalized.mul(self.gamma.val().unsqueeze());
-
-        match &self.beta {
-            Some(beta) => output.add(beta.val().unsqueeze()),
-            None => output,
-        }
+    pub fn forward<const D: usize>(&self, input: Tensor<D>) -> Tensor<D> {
+        layer_norm(
+            input,
+            self.gamma.val(),
+            self.beta.as_ref().map(|b| b.val()),
+            self.epsilon,
+        )
     }
 }
 
-impl<B: Backend> ModuleDisplay for LayerNorm<B> {
+impl ModuleDisplay for LayerNorm {
     fn custom_settings(&self) -> Option<DisplaySettings> {
         DisplaySettings::new()
             .with_new_line_after_attribute(false)
@@ -108,20 +105,14 @@ mod tests {
     use super::*;
     use alloc::format;
     use burn::tensor::TensorData;
-    use burn::tensor::{Tolerance, ops::FloatElem};
-    type FT = FloatElem<TestBackend>;
-
-    #[cfg(feature = "std")]
-    use crate::{TestAutodiffBackend, TestBackend};
-
-    #[cfg(not(feature = "std"))]
-    use crate::TestBackend;
+    use burn::tensor::Tolerance;
+    type FT = f32;
 
     #[test]
     fn layer_norm_forward() {
         let device = Default::default();
-        let module = LayerNormConfig::new(10).init::<TestBackend>(&device);
-        let input = Tensor::<TestBackend, 2>::from_data(
+        let module = LayerNormConfig::new(10).init(&device);
+        let input = Tensor::<2>::from_data(
             TensorData::from([[
                 -0.6897, -2.7106, 2.2222, -1.0330, -0.8933, 1.1765, 0.0601, 1.5252, -0.3630, 0.6728,
             ]]),
@@ -141,10 +132,8 @@ mod tests {
     #[test]
     fn layer_norm_forward_large_epsilon() {
         let device = Default::default();
-        let module = LayerNormConfig::new(10)
-            .with_epsilon(1e-1)
-            .init::<TestBackend>(&device);
-        let input = Tensor::<TestBackend, 2>::from_data(
+        let module = LayerNormConfig::new(10).with_epsilon(1e-1).init(&device);
+        let input = Tensor::<2>::from_data(
             TensorData::from([[
                 -0.6897, -2.7106, 2.2222, -1.0330, -0.8933, 1.1765, 0.0601, 1.5252, -0.3630, 0.6728,
             ]]),
@@ -161,21 +150,39 @@ mod tests {
             .assert_approx_eq::<FT>(&expected, Tolerance::default());
     }
 
+    #[test]
+    fn layer_norm_forward_no_bias() {
+        let device = Default::default();
+        let module = LayerNormConfig::new(10).with_bias(false).init(&device);
+        let input = Tensor::<2>::from_data(
+            TensorData::from([[
+                -0.6897, -2.7106, 2.2222, -1.0330, -0.8933, 1.1765, 0.0601, 1.5252, -0.3630, 0.6728,
+            ]]),
+            &device,
+        );
+
+        let output = module.forward(input);
+
+        // With bias=false, output matches the bias=true case (beta is zero-initialized
+        // by default), confirming the `None` branch in the backend hook produces the
+        // pre-beta result.
+        let expected = TensorData::from([[
+            -0.4990, -1.9680, 1.6178, -0.7486, -0.6470, 0.8576, 0.0461, 1.1111, -0.2614, 0.4915,
+        ]]);
+        output
+            .to_data()
+            .assert_approx_eq::<FT>(&expected, Tolerance::default());
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn layer_norm_backward() {
-        let device = Default::default();
-        let module = LayerNormConfig::new(2).init::<TestAutodiffBackend>(&device);
-        let tensor_1 = Tensor::<TestAutodiffBackend, 2>::from_data(
-            TensorData::from([[0.0, 1.0], [3.0, 4.0]]),
-            &device,
-        )
-        .require_grad();
-        let tensor_2 = Tensor::<TestAutodiffBackend, 2>::from_data(
-            TensorData::from([[6.0, 7.0], [9.0, 10.0]]),
-            &device,
-        )
-        .require_grad();
+        let device = Device::default().autodiff();
+        let module = LayerNormConfig::new(2).init(&device);
+        let tensor_1 = Tensor::<2>::from_data(TensorData::from([[0.0, 1.0], [3.0, 4.0]]), &device)
+            .require_grad();
+        let tensor_2 = Tensor::<2>::from_data(TensorData::from([[6.0, 7.0], [9.0, 10.0]]), &device)
+            .require_grad();
 
         let x = tensor_1.clone().matmul(tensor_2.clone());
 
@@ -211,7 +218,7 @@ mod tests {
     #[test]
     fn display() {
         let config = LayerNormConfig::new(6);
-        let layer_norm = config.init::<TestBackend>(&Default::default());
+        let layer_norm = config.init(&Default::default());
 
         assert_eq!(
             format!("{layer_norm}"),
@@ -222,7 +229,7 @@ mod tests {
     #[test]
     fn display_no_bias() {
         let config = LayerNormConfig::new(6).with_bias(false);
-        let layer_norm = config.init::<TestBackend>(&Default::default());
+        let layer_norm = config.init(&Default::default());
 
         assert_eq!(
             format!("{layer_norm}"),

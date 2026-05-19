@@ -90,6 +90,9 @@ pub enum OperationIr {
     Custom(CustomOpIr),
     /// A tensor is dropped.
     Drop(TensorIr),
+    #[cfg(feature = "distributed")]
+    /// Operation specific to a distributed tensor.
+    Distributed(DistributedOperationIr),
 }
 
 /// Operation intermediate representation specific to a float tensor.
@@ -161,6 +164,8 @@ pub enum FloatOperationIr {
     Dequantize(DequantizeOpIr),
     /// Operation corresponding to [grid_sample_2d](burn_backend::ops::FloatTensorOps::float_grid_sample_2d).
     GridSample2d(GridSample2dOpIr),
+    /// Operation corresponding to [powf](burn_backend::ops::FloatTensorOps::float_powi).
+    Powf(BinaryOpIr),
 }
 
 /// Operation intermediate representation specific to module.
@@ -170,6 +175,14 @@ pub enum ModuleOperationIr {
     Embedding(EmbeddingOpIr),
     /// Operation corresponding to [embedding_backward](burn_backend::ops::ModuleOps::embedding_backward).
     EmbeddingBackward(EmbeddingBackwardOpIr),
+    /// Operation corresponding to [linear](burn_backend::ops::ModuleOps::linear).
+    Linear(LinearOpIr),
+    /// Operation corresponding to [linear_x_backward](burn_backend::ops::ModuleOps::linear_x_backward).
+    LinearXBackward(LinearXBackwardOpIr),
+    /// Operation corresponding to [linear_weight_backward](burn_backend::ops::ModuleOps::linear_weight_backward).
+    LinearWeightBackward(LinearWeightBackwardOpIr),
+    /// Operation corresponding to [linear_bias_backward](burn_backend::ops::ModuleOps::linear_bias_backward).
+    LinearBiasBackward(LinearBiasBackwardOpIr),
     /// Operation corresponding to [conv1d](burn_backend::ops::ModuleOps::conv1d).
     Conv1d(Conv1dOpIr),
     /// Operation corresponding to [conv1d_x_backward](burn_backend::ops::ModuleOps::conv1d_x_backward).
@@ -248,8 +261,17 @@ pub enum ModuleOperationIr {
     Interpolate(InterpolateOpIr),
     /// Operation corresponding to [interpolate backward](burn_backend::ops::ModuleOps::interpolate_backward).
     InterpolateBackward(InterpolateBackwardOpIr),
+    /// Operation corresponding to [rfft](burn_backend::ops::ModuleOps::rfft)
+    Rfft(RfftOpIr),
+    /// Operation corresponding to [irfft](burn_backend::ops::ModuleOps::irfft)
+    IRfft(IRfftOpIr),
     /// Operation corresponding to [attention](burn_backend::ops::ModuleOps::attention).
     Attention(AttentionOpIr),
+    /// Operation corresponding to [ctc_loss](burn_backend::ops::ModuleOps::ctc_loss).
+    CtcLoss(CtcLossOpIr),
+    /// Operation corresponding to
+    /// [ctc_loss_backward](burn_backend::ops::ModuleOps::ctc_loss_backward).
+    CtcLossBackward(CtcLossBackwardOpIr),
 }
 
 /// Basic operations that can be done on any tensor type.
@@ -341,6 +363,10 @@ pub enum BaseOperationIr {
     /// Int => [scatter](burn_backend::ops::IntTensorOps::int_scatter_add).
     /// Bool => [scatter](burn_backend::ops::BoolTensorOps::bool_scatter_or).
     Scatter(ScatterOpIr),
+    /// Multi-dimensional scatter operation.
+    ScatterNd(ScatterNdOpIr),
+    /// Multi-dimensional gather operation.
+    GatherNd(GatherNdOpIr),
     /// Operation corresponding to:
     ///
     /// Float => [equal](burn_backend::ops::FloatTensorOps::float_equal).
@@ -527,6 +553,16 @@ pub enum NumericOperationIr {
     ArgMax(ReduceDimOpIr),
     /// Operation corresponding to:
     ///
+    /// Float => [argtopk](burn_backend::ops::FloatTensorOps::float_argtopk).
+    /// Int => [argtopk](burn_backend::ops::IntTensorOps::int_argtopk).
+    ArgTopK(ReduceDimOpIr),
+    /// Operation corresponding to:
+    ///
+    /// Float => [topk](burn_backend::ops::FloatTensorOps::float_topk).
+    /// Int => [topk](burn_backend::ops::IntTensorOps::int_topk).
+    TopK(ReduceDimOpIr),
+    /// Operation corresponding to:
+    ///
     /// Float => [argmin](burn_backend::ops::FloatTensorOps::float_argmin).
     /// Int => [argmin](burn_backend::ops::IntTensorOps::int_argmin).
     ArgMin(ReduceDimOpIr),
@@ -581,9 +617,14 @@ pub enum NumericOperationIr {
     IntRandom(RandomOpIr),
     /// Operation corresponding to:
     ///
-    /// Float => [powf](burn_backend::ops::FloatTensorOps::float_powf).
-    /// Int => [powf](burn_backend::ops::IntTensorOps::int_powf).
-    Powf(BinaryOpIr),
+    /// Float => [powf](burn_backend::ops::FloatTensorOps::float_powi).
+    /// Int => [powf](burn_backend::ops::IntTensorOps::int_powi).
+    Powi(BinaryOpIr),
+    /// Operation corresponding to:
+    ///
+    /// Float => [powi_scalar](burn_backend::ops::FloatTensorOps::float_powi_scalar).
+    /// Int => [powi_scalar](burn_backend::ops::IntTensorOps::int_powi_scalar).
+    PowiScalar(ScalarOpIr),
     /// Operation corresponding to:
     ///
     /// Float => [cumsum](burn_backend::ops::FloatTensorOps::float_cumsum).
@@ -672,6 +713,15 @@ pub enum BoolOperationIr {
     And(BinaryOpIr),
     /// Operation corresponding to [or](burn_backend::ops::BoolTensorOps::bool_or).
     Or(BinaryOpIr),
+}
+
+#[cfg(feature = "distributed")]
+/// Operations that can be done on distributed tensors.
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+pub enum DistributedOperationIr {
+    /// Operation corresponding to:
+    /// [all_reduce](burn_backend::distributed::DistributedBackend::all_reduce).
+    AllReduce(AllReduceOpIr),
 }
 
 /// Swap dim operation intermediate representation.
@@ -822,6 +872,7 @@ pub struct ReduceDimOpIr {
     pub input: TensorIr,
     pub out: TensorIr,
     pub axis: usize,
+    pub accumulator_len: usize,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
@@ -858,6 +909,24 @@ pub struct ScatterOpIr {
     pub indices: TensorIr,
     pub value: TensorIr,
     pub update: IndexingUpdateOp,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ScatterNdOpIr {
+    pub data: TensorIr,
+    pub indices: TensorIr,
+    pub values: TensorIr,
+    pub reduction: IndexingUpdateOp,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct GatherNdOpIr {
+    pub data: TensorIr,
+    pub indices: TensorIr,
     pub out: TensorIr,
 }
 
@@ -942,6 +1011,14 @@ pub struct CatOpIr {
     pub out: TensorIr,
 }
 
+#[cfg(feature = "distributed")]
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct AllReduceOpIr {
+    pub tensor: TensorIr,
+    pub out: TensorIr,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct ReduceDimWithIndicesOpIr {
@@ -965,6 +1042,38 @@ pub struct EmbeddingBackwardOpIr {
     pub weights: TensorIr,
     pub out_grad: TensorIr,
     pub indices: TensorIr,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct LinearOpIr {
+    pub x: TensorIr,
+    pub weight: TensorIr,
+    pub bias: Option<TensorIr>,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct LinearXBackwardOpIr {
+    pub weight: TensorIr,
+    pub output_grad: TensorIr,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct LinearWeightBackwardOpIr {
+    pub x: TensorIr,
+    pub output_grad: TensorIr,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct LinearBiasBackwardOpIr {
+    pub output_grad: TensorIr,
     pub out: TensorIr,
 }
 
@@ -1562,6 +1671,7 @@ pub enum InterpolateModeIr {
     Nearest,
     Bilinear,
     Bicubic,
+    Lanczos3,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
@@ -1578,6 +1688,83 @@ pub struct InterpolateOpIr {
     pub output_size: [usize; 2],
     pub options: InterpolateOptionsIr,
     pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct RfftOpIr {
+    pub signal: TensorIr,
+    pub dim: usize,
+    pub n: Option<usize>,
+    pub out_re: TensorIr,
+    pub out_im: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct IRfftOpIr {
+    pub input_re: TensorIr,
+    pub input_im: TensorIr,
+    pub dim: usize,
+    pub n: Option<usize>,
+    pub out_signal: TensorIr,
+}
+
+#[allow(missing_docs)]
+impl RfftOpIr {
+    pub fn create<F>(signal: TensorIr, dim: usize, n: Option<usize>, mut new_id: F) -> Self
+    where
+        F: FnMut() -> crate::TensorId,
+    {
+        // `n` is required to be a power of two at the public API boundary, so
+        // the output has `n / 2 + 1` bins (matching scipy/torch for pow2 n).
+        let mut shape = signal.shape.clone();
+        let fft_len = n.unwrap_or(shape[dim]);
+        shape[dim] = fft_len / 2 + 1;
+        let dtype = signal.dtype;
+
+        Self {
+            signal,
+            dim,
+            n,
+            out_re: TensorIr::uninit(new_id(), shape.clone(), dtype),
+            out_im: TensorIr::uninit(new_id(), shape, dtype),
+        }
+    }
+}
+
+#[allow(missing_docs)]
+impl IRfftOpIr {
+    pub fn create<F>(
+        input_re: TensorIr,
+        input_im: TensorIr,
+        dim: usize,
+        n: Option<usize>,
+        mut new_id: F,
+    ) -> Self
+    where
+        F: FnMut() -> crate::TensorId,
+    {
+        debug_assert!(
+            input_re.shape[dim] >= 1,
+            "IRfftOpIr: input spectrum dimension must be >= 1"
+        );
+        debug_assert!(
+            !matches!(n, Some(0)),
+            "IRfftOpIr: n must be >= 1 when specified"
+        );
+        let mut shape = input_re.shape.clone();
+        shape[dim] = n.unwrap_or((shape[dim] - 1) * 2);
+        let dtype = input_re.dtype;
+
+        Self {
+            input_re,
+            input_im,
+            dim,
+            n,
+            out_signal: TensorIr::uninit(new_id(), shape, dtype),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
@@ -1620,12 +1807,36 @@ pub struct AttentionOpIr {
     pub out: TensorIr,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CtcLossOpIr {
+    pub log_probs: TensorIr,
+    pub targets: TensorIr,
+    pub input_lengths: TensorIr,
+    pub target_lengths: TensorIr,
+    pub blank: usize,
+    pub out: TensorIr,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CtcLossBackwardOpIr {
+    pub log_probs: TensorIr,
+    pub targets: TensorIr,
+    pub input_lengths: TensorIr,
+    pub target_lengths: TensorIr,
+    pub grad_loss: TensorIr,
+    pub blank: usize,
+    pub out: TensorIr,
+}
+
 impl From<InterpolateModeIr> for InterpolateMode {
     fn from(val: InterpolateModeIr) -> Self {
         match val {
             InterpolateModeIr::Nearest => Self::Nearest,
             InterpolateModeIr::Bilinear => Self::Bilinear,
             InterpolateModeIr::Bicubic => Self::Bicubic,
+            InterpolateModeIr::Lanczos3 => Self::Lanczos3,
         }
     }
 }
@@ -1642,6 +1853,7 @@ impl From<InterpolateMode> for InterpolateModeIr {
             InterpolateMode::Nearest => Self::Nearest,
             InterpolateMode::Bilinear => Self::Bilinear,
             InterpolateMode::Bicubic => Self::Bicubic,
+            InterpolateMode::Lanczos3 => Self::Lanczos3,
         }
     }
 }
@@ -1746,6 +1958,8 @@ impl OperationIr {
             OperationIr::Init(repr) => repr.inputs(),
             OperationIr::Custom(repr) => repr.inputs(),
             OperationIr::Drop(repr) => Box::new([repr].into_iter()),
+            #[cfg(feature = "distributed")]
+            OperationIr::Distributed(repr) => repr.inputs(),
         }
     }
 
@@ -1764,6 +1978,8 @@ impl OperationIr {
             OperationIr::Init(repr) => repr.outputs(),
             OperationIr::Custom(repr) => repr.outputs(),
             OperationIr::Drop(_repr) => Box::new([].into_iter()),
+            #[cfg(feature = "distributed")]
+            OperationIr::Distributed(repr) => repr.outputs(),
         }
     }
 
@@ -1802,6 +2018,8 @@ impl OperationIr {
 
                 output
             }
+            #[cfg(feature = "distributed")]
+            OperationIr::Distributed(repr) => repr.mark_read_only(nodes),
         }
     }
 }
@@ -1820,6 +2038,10 @@ impl BaseOperationIr {
             BaseOperationIr::Scatter(repr) => {
                 Box::new([&repr.tensor, &repr.indices, &repr.value].into_iter())
             }
+            BaseOperationIr::ScatterNd(repr) => {
+                Box::new([&repr.data, &repr.indices, &repr.values].into_iter())
+            }
+            BaseOperationIr::GatherNd(repr) => Box::new([&repr.data, &repr.indices].into_iter()),
             BaseOperationIr::Select(repr) => Box::new([&repr.tensor, &repr.indices].into_iter()),
             BaseOperationIr::SelectAssign(repr) => {
                 Box::new([&repr.tensor, &repr.indices, &repr.value].into_iter())
@@ -1851,6 +2073,8 @@ impl BaseOperationIr {
             BaseOperationIr::SliceAssign(repr) => Box::new([&repr.out].into_iter()),
             BaseOperationIr::Gather(repr) => Box::new([&repr.out].into_iter()),
             BaseOperationIr::Scatter(repr) => Box::new([&repr.out].into_iter()),
+            BaseOperationIr::ScatterNd(repr) => Box::new([&repr.out].into_iter()),
+            BaseOperationIr::GatherNd(repr) => Box::new([&repr.out].into_iter()),
             BaseOperationIr::Select(repr) => Box::new([&repr.out].into_iter()),
             BaseOperationIr::SelectAssign(repr) => Box::new([&repr.out].into_iter()),
             BaseOperationIr::MaskWhere(repr) => Box::new([&repr.out].into_iter()),
@@ -1903,6 +2127,15 @@ impl BaseOperationIr {
                 repr.tensor.mark_read_only(nodes, &mut output);
                 repr.indices.mark_read_only(nodes, &mut output);
                 repr.value.mark_read_only(nodes, &mut output);
+            }
+            BaseOperationIr::ScatterNd(repr) => {
+                repr.data.mark_read_only(nodes, &mut output);
+                repr.indices.mark_read_only(nodes, &mut output);
+                repr.values.mark_read_only(nodes, &mut output);
+            }
+            BaseOperationIr::GatherNd(repr) => {
+                repr.data.mark_read_only(nodes, &mut output);
+                repr.indices.mark_read_only(nodes, &mut output);
             }
             BaseOperationIr::Select(repr) => {
                 repr.tensor.mark_read_only(nodes, &mut output);
@@ -1974,6 +2207,8 @@ impl NumericOperationIr {
             NumericOperationIr::Lower(repr) => Box::new([&repr.lhs, &repr.rhs].into_iter()),
             NumericOperationIr::LowerEqual(repr) => Box::new([&repr.lhs, &repr.rhs].into_iter()),
             NumericOperationIr::ArgMax(repr) => Box::new([&repr.input].into_iter()),
+            NumericOperationIr::ArgTopK(repr) => Box::new([&repr.input].into_iter()),
+            NumericOperationIr::TopK(repr) => Box::new([&repr.input].into_iter()),
             NumericOperationIr::ArgMin(repr) => Box::new([&repr.input].into_iter()),
             NumericOperationIr::Clamp(repr) => Box::new([&repr.tensor].into_iter()),
             NumericOperationIr::Abs(repr) => Box::new([&repr.input].into_iter()),
@@ -1993,11 +2228,12 @@ impl NumericOperationIr {
             NumericOperationIr::MaxAbs(repr) => Box::new([&repr.input].into_iter()),
             NumericOperationIr::MaxAbsDim(repr) => Box::new([&repr.input].into_iter()),
             NumericOperationIr::IntRandom(_repr) => Box::new([].into_iter()),
-            NumericOperationIr::Powf(repr) => Box::new([&repr.lhs, &repr.rhs].into_iter()),
-            NumericOperationIr::CumMin(repr) => Box::new([&repr.out].into_iter()),
-            NumericOperationIr::CumMax(repr) => Box::new([&repr.out].into_iter()),
-            NumericOperationIr::CumProd(repr) => Box::new([&repr.out].into_iter()),
-            NumericOperationIr::CumSum(repr) => Box::new([&repr.out].into_iter()),
+            NumericOperationIr::Powi(repr) => Box::new([&repr.lhs, &repr.rhs].into_iter()),
+            NumericOperationIr::PowiScalar(repr) => Box::new([&repr.lhs].into_iter()),
+            NumericOperationIr::CumMin(repr) => Box::new([&repr.input].into_iter()),
+            NumericOperationIr::CumMax(repr) => Box::new([&repr.input].into_iter()),
+            NumericOperationIr::CumProd(repr) => Box::new([&repr.input].into_iter()),
+            NumericOperationIr::CumSum(repr) => Box::new([&repr.input].into_iter()),
         }
     }
 
@@ -2022,6 +2258,8 @@ impl NumericOperationIr {
             NumericOperationIr::Lower(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::LowerEqual(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::ArgMax(repr) => Box::new([&repr.out].into_iter()),
+            NumericOperationIr::ArgTopK(repr) => Box::new([&repr.out].into_iter()),
+            NumericOperationIr::TopK(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::ArgMin(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::Clamp(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::Abs(repr) => Box::new([&repr.out].into_iter()),
@@ -2045,7 +2283,8 @@ impl NumericOperationIr {
             NumericOperationIr::MaxAbs(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::MaxAbsDim(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::IntRandom(repr) => Box::new([&repr.out].into_iter()),
-            NumericOperationIr::Powf(repr) => Box::new([&repr.out].into_iter()),
+            NumericOperationIr::Powi(repr) => Box::new([&repr.out].into_iter()),
+            NumericOperationIr::PowiScalar(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::CumMin(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::CumMax(repr) => Box::new([&repr.out].into_iter()),
             NumericOperationIr::CumProd(repr) => Box::new([&repr.out].into_iter()),
@@ -2122,6 +2361,12 @@ impl NumericOperationIr {
             NumericOperationIr::ArgMax(repr) => {
                 repr.input.mark_read_only(nodes, &mut output);
             }
+            NumericOperationIr::ArgTopK(repr) => {
+                repr.input.mark_read_only(nodes, &mut output);
+            }
+            NumericOperationIr::TopK(repr) => {
+                repr.input.mark_read_only(nodes, &mut output);
+            }
             NumericOperationIr::ArgMin(repr) => {
                 repr.input.mark_read_only(nodes, &mut output);
             }
@@ -2175,9 +2420,12 @@ impl NumericOperationIr {
                 repr.input.mark_read_only(nodes, &mut output);
             }
             NumericOperationIr::IntRandom(_) => {}
-            NumericOperationIr::Powf(repr) => {
+            NumericOperationIr::Powi(repr) => {
                 repr.lhs.mark_read_only(nodes, &mut output);
                 repr.rhs.mark_read_only(nodes, &mut output);
+            }
+            NumericOperationIr::PowiScalar(repr) => {
+                repr.lhs.mark_read_only(nodes, &mut output);
             }
             NumericOperationIr::CumSum(repr) => {
                 repr.input.mark_read_only(nodes, &mut output);
@@ -2237,6 +2485,7 @@ impl FloatOperationIr {
             FloatOperationIr::ArcTan(repr) => Box::new([&repr.input].into_iter()),
             FloatOperationIr::ArcTanh(repr) => Box::new([&repr.input].into_iter()),
             FloatOperationIr::ArcTan2(repr) => Box::new([&repr.lhs, &repr.rhs].into_iter()),
+            FloatOperationIr::Powf(repr) => Box::new([&repr.lhs, &repr.rhs].into_iter()),
         }
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = &TensorIr> + '_> {
@@ -2274,6 +2523,7 @@ impl FloatOperationIr {
             FloatOperationIr::ArcTan(repr) => Box::new([&repr.out].into_iter()),
             FloatOperationIr::ArcTanh(repr) => Box::new([&repr.out].into_iter()),
             FloatOperationIr::ArcTan2(repr) => Box::new([&repr.out].into_iter()),
+            FloatOperationIr::Powf(repr) => Box::new([&repr.out].into_iter()),
         }
     }
 
@@ -2362,6 +2612,10 @@ impl FloatOperationIr {
             FloatOperationIr::ArcTan(repr) => repr.input.mark_read_only(nodes, &mut output),
             FloatOperationIr::ArcTanh(repr) => repr.input.mark_read_only(nodes, &mut output),
             FloatOperationIr::ArcTan2(repr) => {
+                repr.lhs.mark_read_only(nodes, &mut output);
+                repr.rhs.mark_read_only(nodes, &mut output);
+            }
+            FloatOperationIr::Powf(repr) => {
                 repr.lhs.mark_read_only(nodes, &mut output);
                 repr.rhs.mark_read_only(nodes, &mut output);
             }
@@ -2518,6 +2772,22 @@ impl ModuleOperationIr {
             ModuleOperationIr::EmbeddingBackward(repr) => {
                 Box::new([&repr.weights, &repr.out_grad, &repr.indices].into_iter())
             }
+            ModuleOperationIr::Linear(repr) => {
+                if let Some(bias) = &repr.bias {
+                    Box::new([&repr.x, &repr.weight, bias].into_iter())
+                } else {
+                    Box::new([&repr.x, &repr.weight].into_iter())
+                }
+            }
+            ModuleOperationIr::LinearXBackward(repr) => {
+                Box::new([&repr.weight, &repr.output_grad].into_iter())
+            }
+            ModuleOperationIr::LinearWeightBackward(repr) => {
+                Box::new([&repr.x, &repr.output_grad].into_iter())
+            }
+            ModuleOperationIr::LinearBiasBackward(repr) => {
+                Box::new([&repr.output_grad].into_iter())
+            }
             ModuleOperationIr::Conv1d(repr) => {
                 if let Some(bias) = &repr.bias {
                     Box::new([&repr.x, &repr.weight, bias].into_iter())
@@ -2651,6 +2921,10 @@ impl ModuleOperationIr {
             ModuleOperationIr::InterpolateBackward(repr) => {
                 Box::new([&repr.x, &repr.grad].into_iter())
             }
+            ModuleOperationIr::Rfft(repr) => Box::new([&repr.signal].into_iter()),
+            ModuleOperationIr::IRfft(repr) => {
+                Box::new([&repr.input_re, &repr.input_im].into_iter())
+            }
             ModuleOperationIr::Attention(repr) => {
                 if let Some(mask) = &repr.mask {
                     if let Some(attn_bias) = &repr.attn_bias {
@@ -2664,12 +2938,35 @@ impl ModuleOperationIr {
                     Box::new([&repr.query, &repr.key, &repr.value].into_iter())
                 }
             }
+            ModuleOperationIr::CtcLoss(repr) => Box::new(
+                [
+                    &repr.log_probs,
+                    &repr.targets,
+                    &repr.input_lengths,
+                    &repr.target_lengths,
+                ]
+                .into_iter(),
+            ),
+            ModuleOperationIr::CtcLossBackward(repr) => Box::new(
+                [
+                    &repr.log_probs,
+                    &repr.targets,
+                    &repr.input_lengths,
+                    &repr.target_lengths,
+                    &repr.grad_loss,
+                ]
+                .into_iter(),
+            ),
         }
     }
     fn outputs(&self) -> Box<dyn Iterator<Item = &TensorIr> + '_> {
         match self {
             ModuleOperationIr::Embedding(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::EmbeddingBackward(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::Linear(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::LinearXBackward(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::LinearWeightBackward(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::LinearBiasBackward(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::Conv1d(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::Conv1dXBackward(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::Conv1dWeightBackward(repr) => Box::new([&repr.out].into_iter()),
@@ -2745,7 +3042,11 @@ impl ModuleOperationIr {
             }
             ModuleOperationIr::Interpolate(repr) => Box::new([&repr.out].into_iter()),
             ModuleOperationIr::InterpolateBackward(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::Rfft(repr) => Box::new([&repr.out_re, &repr.out_im].into_iter()),
+            ModuleOperationIr::IRfft(repr) => Box::new([&repr.out_signal].into_iter()),
             ModuleOperationIr::Attention(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::CtcLoss(repr) => Box::new([&repr.out].into_iter()),
+            ModuleOperationIr::CtcLossBackward(repr) => Box::new([&repr.out].into_iter()),
         }
     }
 
@@ -2761,6 +3062,25 @@ impl ModuleOperationIr {
                 repr.weights.mark_read_only(nodes, &mut output);
                 repr.out_grad.mark_read_only(nodes, &mut output);
                 repr.indices.mark_read_only(nodes, &mut output);
+            }
+            ModuleOperationIr::Linear(repr) => {
+                repr.x.mark_read_only(nodes, &mut output);
+                repr.weight.mark_read_only(nodes, &mut output);
+
+                if let Some(bias) = &mut repr.bias {
+                    bias.mark_read_only(nodes, &mut output);
+                }
+            }
+            ModuleOperationIr::LinearXBackward(repr) => {
+                repr.weight.mark_read_only(nodes, &mut output);
+                repr.output_grad.mark_read_only(nodes, &mut output);
+            }
+            ModuleOperationIr::LinearWeightBackward(repr) => {
+                repr.x.mark_read_only(nodes, &mut output);
+                repr.output_grad.mark_read_only(nodes, &mut output);
+            }
+            ModuleOperationIr::LinearBiasBackward(repr) => {
+                repr.output_grad.mark_read_only(nodes, &mut output);
             }
             ModuleOperationIr::Conv1d(repr) => {
                 repr.x.mark_read_only(nodes, &mut output);
@@ -2942,6 +3262,13 @@ impl ModuleOperationIr {
                 repr.x.mark_read_only(nodes, &mut output);
                 repr.grad.mark_read_only(nodes, &mut output);
             }
+            ModuleOperationIr::Rfft(repr) => {
+                repr.signal.mark_read_only(nodes, &mut output);
+            }
+            ModuleOperationIr::IRfft(repr) => {
+                repr.input_re.mark_read_only(nodes, &mut output);
+                repr.input_im.mark_read_only(nodes, &mut output);
+            }
             ModuleOperationIr::Attention(repr) => {
                 repr.query.mark_read_only(nodes, &mut output);
                 repr.key.mark_read_only(nodes, &mut output);
@@ -2953,7 +3280,47 @@ impl ModuleOperationIr {
                     attn_bias.mark_read_only(nodes, &mut output);
                 }
             }
+            ModuleOperationIr::CtcLoss(repr) => {
+                repr.log_probs.mark_read_only(nodes, &mut output);
+                repr.targets.mark_read_only(nodes, &mut output);
+                repr.input_lengths.mark_read_only(nodes, &mut output);
+                repr.target_lengths.mark_read_only(nodes, &mut output);
+            }
+            ModuleOperationIr::CtcLossBackward(repr) => {
+                repr.log_probs.mark_read_only(nodes, &mut output);
+                repr.targets.mark_read_only(nodes, &mut output);
+                repr.input_lengths.mark_read_only(nodes, &mut output);
+                repr.target_lengths.mark_read_only(nodes, &mut output);
+                repr.grad_loss.mark_read_only(nodes, &mut output);
+            }
         };
+
+        output
+    }
+}
+
+#[cfg(feature = "distributed")]
+impl DistributedOperationIr {
+    fn inputs(&self) -> Box<dyn Iterator<Item = &TensorIr> + '_> {
+        match self {
+            DistributedOperationIr::AllReduce(repr) => Box::new([&repr.tensor].into_iter()),
+        }
+    }
+
+    fn outputs(&self) -> Box<dyn Iterator<Item = &TensorIr> + '_> {
+        match self {
+            DistributedOperationIr::AllReduce(repr) => Box::new([&repr.out].into_iter()),
+        }
+    }
+
+    fn mark_read_only(&mut self, nodes: &[TensorId]) -> Vec<TensorIr> {
+        let mut output = Vec::new();
+
+        match self {
+            DistributedOperationIr::AllReduce(repr) => {
+                repr.tensor.mark_read_only(nodes, &mut output);
+            }
+        }
 
         output
     }

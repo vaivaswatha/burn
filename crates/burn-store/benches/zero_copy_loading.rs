@@ -8,9 +8,9 @@
 //!
 //! ## Understanding the Results
 //!
-//! **IMPORTANT**: For NdArray backend, you'll see similar allocation numbers because:
-//! - NdArray uses `ndarray::ArrayD` which MUST own data as `Vec<T>`
-//! - Even with zero-copy, the backend eventually copies data into its own format
+//! **IMPORTANT**: For the Flex backend, you'll see similar allocation numbers
+//! because Flex currently copies incoming bytes into its own `Bytes` storage
+//! on load rather than borrowing from the underlying buffer.
 //!
 //! The zero-copy benefit is:
 //! - **Without zero-copy**: File → Copy to heap (Bytes) → Copy to Vec (backend)
@@ -38,11 +38,11 @@ use burn_core as burn;
 
 use burn_core::module::Module;
 use burn_core::prelude::*;
+use burn_core::tensor::{AllocationProperty, Bytes};
 use burn_nn as nn;
 use burn_store::{
     BurnpackStore, ModuleSnapshot, ModuleStore, PyTorchToBurnAdapter, SafetensorsStore,
 };
-use burn_tensor::{AllocationProperty, Bytes};
 use divan::{AllocProfiler, Bencher};
 use std::fs;
 use std::path::PathBuf;
@@ -55,28 +55,24 @@ static ALLOC: AllocProfiler = AllocProfiler::system();
 static STATIC_MODEL_BYTES: OnceLock<&'static [u8]> = OnceLock::new();
 
 // Backend type aliases
-type NdArrayBackend = burn_ndarray::NdArray<f32>;
+use burn_core::tensor::FlexDevice;
 
-#[cfg(feature = "wgpu")]
-type WgpuBackend = burn_wgpu::Wgpu;
+#[cfg(any(feature = "wgpu", feature = "metal"))]
+use burn_core::tensor::WgpuDevice;
 
 #[cfg(feature = "cuda")]
-type CudaBackend = burn_cuda::Cuda<f32, i32>;
+use burn_core::tensor::CudaDevice;
 
 #[cfg(feature = "tch")]
-type TchBackend = burn_tch::LibTorch<f32>;
-
-#[cfg(feature = "metal")]
-type MetalBackend = burn_wgpu::Metal;
-
+use burn_core::tensor::LibTorchDevice;
 // Use the same LargeModel as other benchmarks for fair comparison
 #[derive(Module, Debug)]
-struct LargeModel<B: Backend> {
-    layers: Vec<nn::Linear<B>>,
+struct LargeModel {
+    layers: Vec<nn::Linear>,
 }
 
-impl<B: Backend> LargeModel<B> {
-    fn new(device: &B::Device) -> Self {
+impl LargeModel {
+    fn new(device: &Device) -> Self {
         let mut layers = Vec::new();
         // Create a model with 20 layers - same as unified_loading benchmark
         for i in 0..20 {
@@ -122,11 +118,10 @@ fn ensure_burnpack_file() {
 
     println!("⏳ Generating Burnpack file from SafeTensors...");
 
-    type TestBackend = NdArrayBackend;
-    let device = Default::default();
+    let device = FlexDevice.into();
 
     // Load from SafeTensors
-    let mut model = LargeModel::<TestBackend>::new(&device);
+    let mut model = LargeModel::new(&device);
     let mut store = SafetensorsStore::from_file(&st_path).with_from_adapter(PyTorchToBurnAdapter);
     model
         .load_from(&mut store)
@@ -171,7 +166,7 @@ fn main() {
     println!("  4. static_zero_copy - from_static()                - zero-copy from static");
     println!();
     println!("Available backends:");
-    println!("  - NdArray (CPU)");
+    println!("  - Flex (CPU)");
     #[cfg(feature = "wgpu")]
     println!("  - WGPU (GPU)");
     #[cfg(feature = "cuda")]
@@ -190,13 +185,10 @@ fn main() {
 
 // Macro to generate benchmarks for each backend
 macro_rules! bench_backend {
-    ($backend:ty, $mod_name:ident, $backend_name:literal) => {
+    ($device:expr, $mod_name:ident, $backend_name:literal) => {
         #[divan::bench_group(name = $backend_name, sample_count = 10)]
         mod $mod_name {
             use super::*;
-
-            type TestBackend = $backend;
-            type TestDevice = <TestBackend as Backend>::Device;
 
             /// File-based loading with copy mode (default)
             #[divan::bench]
@@ -207,8 +199,8 @@ macro_rules! bench_backend {
                 bencher
                     .counter(divan::counter::BytesCount::new(file_size))
                     .bench(|| {
-                        let device: TestDevice = Default::default();
-                        let mut model = LargeModel::<TestBackend>::new(&device);
+                        let device: Device = $device.into();
+                        let mut model = LargeModel::new(&device);
                         let mut store = BurnpackStore::from_file(&bp_path).zero_copy(false);
                         model.load_from(&mut store).expect("Failed to load");
                     });
@@ -223,8 +215,8 @@ macro_rules! bench_backend {
                 bencher
                     .counter(divan::counter::BytesCount::new(file_size))
                     .bench(|| {
-                        let device: TestDevice = Default::default();
-                        let mut model = LargeModel::<TestBackend>::new(&device);
+                        let device: Device = $device.into();
+                        let mut model = LargeModel::new(&device);
                         let mut store = BurnpackStore::from_file(&bp_path).zero_copy(true);
                         model.load_from(&mut store).expect("Failed to load");
                     });
@@ -239,8 +231,8 @@ macro_rules! bench_backend {
                 bencher
                     .counter(divan::counter::BytesCount::new(file_size))
                     .bench(|| {
-                        let device: TestDevice = Default::default();
-                        let mut model = LargeModel::<TestBackend>::new(&device);
+                        let device: Device = $device.into();
+                        let mut model = LargeModel::new(&device);
 
                         // Simulate old behavior: copy static bytes to Vec, then load
                         let bytes = Bytes::from_bytes_vec(static_bytes.to_vec());
@@ -258,8 +250,8 @@ macro_rules! bench_backend {
                 bencher
                     .counter(divan::counter::BytesCount::new(file_size))
                     .bench(|| {
-                        let device: TestDevice = Default::default();
-                        let mut model = LargeModel::<TestBackend>::new(&device);
+                        let device: Device = $device.into();
+                        let mut model = LargeModel::new(&device);
 
                         // Zero-copy: use from_static which keeps data in .rodata
                         let mut store = BurnpackStore::from_static(static_bytes);
@@ -279,8 +271,8 @@ macro_rules! bench_backend {
                 bencher
                     .counter(divan::counter::BytesCount::new(file_size))
                     .bench(|| {
-                        let device: TestDevice = Default::default();
-                        let mut model = LargeModel::<TestBackend>::new(&device);
+                        let device: Device = $device.into();
+                        let mut model = LargeModel::new(&device);
 
                         // Create Bytes from shared (cheap clone of Arc)
                         let bytes = Bytes::from_shared(shared.clone(), AllocationProperty::Other);
@@ -301,71 +293,6 @@ macro_rules! bench_backend {
 #[divan::bench_group(name = "Zero-Copy Verification", sample_count = 1)]
 mod verification {
     use super::*;
-    use burn_ndarray::NdArray;
-
-    type B = NdArray<f32>;
-
-    /// Verify zero-copy: tensor storage is borrowed (not owned)
-    #[divan::bench]
-    fn verify_storage_is_borrowed() {
-        let static_bytes = get_static_model_bytes();
-
-        // Load model with zero-copy from static bytes
-        let device = Default::default();
-        let mut model = LargeModel::<B>::new(&device);
-        let mut store = BurnpackStore::from_static(static_bytes);
-        model.load_from(&mut store).expect("Failed to load");
-
-        // Get the first layer's weight tensor and verify it uses borrowed storage
-        let weight = model.layers[0].weight.val();
-        // .into_primitive() returns TensorPrimitive<B>, .tensor() extracts B::FloatTensorPrimitive
-        let ndarray_tensor = weight.into_primitive().tensor();
-
-        // Verify the storage is borrowed (zero-copy from static region)
-        assert!(
-            ndarray_tensor.is_borrowed(),
-            "ZERO-COPY FAILURE: Tensor storage is NOT borrowed. \
-             Data was copied instead of being zero-copy!"
-        );
-
-        println!("✅ Verified: Tensor storage is borrowed (zero-copy from static region)");
-    }
-
-    /// Verify ALL layers use borrowed (zero-copy) storage.
-    /// This is the key proof that loaded weights point to static memory.
-    #[divan::bench]
-    fn verify_all_layers_borrowed() {
-        let static_bytes = get_static_model_bytes();
-
-        // Load model with zero-copy
-        let device = Default::default();
-        let mut model = LargeModel::<B>::new(&device);
-        let mut store = BurnpackStore::from_static(static_bytes);
-        model.load_from(&mut store).expect("Failed to load");
-
-        // Check ALL layers have borrowed storage
-        let mut total_elements = 0usize;
-        for (i, layer) in model.layers.iter().enumerate() {
-            let weight = layer.weight.val();
-            total_elements += weight.shape().num_elements();
-
-            assert!(
-                weight.into_primitive().tensor().is_borrowed(),
-                "Layer {} weight should be borrowed (zero-copy)",
-                i
-            );
-        }
-
-        let total_mb = (total_elements * 4) as f64 / 1_048_576.0;
-        println!(
-            "✅ Verified: All {} layers use borrowed storage",
-            model.layers.len()
-        );
-        println!(
-            "   - Model size: {:.2} MB - all pointing to static region",
-            total_mb
-        );
-    }
 
     /// Verify data is readable and correct using sum().into_scalar().
     /// Note: sum() triggers COW copy, so this shows ops work correctly on zero-copy data.
@@ -373,8 +300,8 @@ mod verification {
     fn verify_ops_produce_correct_results() {
         let static_bytes = get_static_model_bytes();
 
-        let device = Default::default();
-        let mut model = LargeModel::<B>::new(&device);
+        let device = FlexDevice.into();
+        let mut model = LargeModel::new(&device);
         let mut store = BurnpackStore::from_static(static_bytes);
         model.load_from(&mut store).expect("Failed to load");
 
@@ -393,8 +320,8 @@ mod verification {
         let static_bytes = get_static_model_bytes();
 
         // Load model with zero-copy
-        let device = Default::default();
-        let mut model = LargeModel::<B>::new(&device);
+        let device = FlexDevice.into();
+        let mut model = LargeModel::new(&device);
         let mut store = BurnpackStore::from_static(static_bytes);
         model.load_from(&mut store).expect("Failed to load");
 
@@ -440,17 +367,17 @@ mod verification {
     #[divan::bench]
     fn verify_copy_vs_zero_copy_equality() {
         let static_bytes = get_static_model_bytes();
-        let device: <B as Backend>::Device = Default::default();
+        let device = FlexDevice.into();
 
         // Load with zero-copy
-        let mut model_zc = LargeModel::<B>::new(&device);
+        let mut model_zc = LargeModel::new(&device);
         let mut store_zc = BurnpackStore::from_static(static_bytes);
         model_zc
             .load_from(&mut store_zc)
             .expect("Failed to load zero-copy");
 
         // Load with copy (simulate old behavior)
-        let mut model_copy = LargeModel::<B>::new(&device);
+        let mut model_copy = LargeModel::new(&device);
         let bytes = Bytes::from_bytes_vec(static_bytes.to_vec());
         let mut store_copy = BurnpackStore::from_bytes(Some(bytes)).zero_copy(false);
         model_copy
@@ -581,16 +508,24 @@ mod store_only {
 // =============================================================================
 
 // Generate benchmarks for each backend
-bench_backend!(NdArrayBackend, ndarray_backend, "NdArray Backend (CPU)");
+bench_backend!(FlexDevice, ndarray_backend, "NdArray Backend (CPU)");
 
 #[cfg(feature = "wgpu")]
-bench_backend!(WgpuBackend, wgpu_backend, "WGPU Backend (GPU)");
+bench_backend!(WgpuDevice::default(), wgpu_backend, "WGPU Backend (GPU)");
 
 #[cfg(feature = "cuda")]
-bench_backend!(CudaBackend, cuda_backend, "CUDA Backend (NVIDIA GPU)");
+bench_backend!(
+    CudaDevice::default(),
+    cuda_backend,
+    "CUDA Backend (NVIDIA GPU)"
+);
 
 #[cfg(feature = "tch")]
-bench_backend!(TchBackend, tch_backend, "LibTorch Backend");
+bench_backend!(LibTorchDevice::default(), tch_backend, "LibTorch Backend");
 
 #[cfg(feature = "metal")]
-bench_backend!(MetalBackend, metal_backend, "Metal Backend (Apple GPU)");
+bench_backend!(
+    WgpuDevice::default(),
+    metal_backend,
+    "Metal Backend (Apple GPU)"
+);

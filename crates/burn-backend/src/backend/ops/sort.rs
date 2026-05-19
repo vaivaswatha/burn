@@ -3,10 +3,10 @@ use core::cmp::Ordering;
 use crate::{
     Backend, DType, TensorData,
     element::{ElementConversion, ElementOrdered},
-    tensor::{BasicOps, IntElem, IntTensor},
+    tensor::{Device, IntElem, IntTensor},
 };
 use alloc::{vec, vec::Vec};
-use burn_std::reader::try_read_sync;
+use burn_std::IntDType;
 use burn_std::{bf16, f16};
 
 /// Macro used to dispatch sort operations based on dtype.
@@ -25,7 +25,7 @@ macro_rules! sort_dispatch_dtype {
             DType::U32 => $fn::<B, u32>($data, $($args),*),
             DType::U16 => $fn::<B, u16>($data, $($args),*),
             DType::U8 => $fn::<B, u8>($data, $($args),*),
-            DType::Bool | DType::QFloat(_) => unimplemented!("not supported for sorting operations"),
+            DType::Bool(_) | DType::QFloat(_) => unimplemented!("not supported for sorting operations"),
         }
     };
 }
@@ -50,19 +50,23 @@ macro_rules! sort_dispatch_dtype {
 /// Ideally, it is supposed to be implemented by the backend and the backend implementation will be resolved
 /// by static dispatch. It is not designed for direct usage by users, and not recommended to import
 /// or use this function directly.
-pub fn sort<B: Backend, K: BasicOps<B>>(
-    tensor: K::Primitive,
+pub fn sort<B, T, ID, FD>(
+    tensor: T,
     dim: usize,
     descending: bool,
-) -> K::Primitive {
-    let device = K::device(&tensor);
-    let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
-    let data = try_read_sync(K::into_data_async(tensor))
-        .expect(msg)
-        .expect(msg);
-
+    device: Device<B>,
+    into_data: ID,
+    from_data: FD,
+) -> T
+where
+    B: Backend,
+    ID: Fn(T) -> TensorData,
+    FD: Fn(TensorData, &Device<B>, DType) -> T,
+{
+    let data = into_data(tensor);
+    let dtype = data.dtype;
     let data = sort_dispatch_dtype!(sort_data, data, dim, descending);
-    K::from_data(data, &device)
+    from_data(data, &device, dtype)
 }
 
 pub fn sort_data<B: Backend, E: ElementOrdered>(
@@ -91,6 +95,7 @@ pub fn sort_data<B: Backend, E: ElementOrdered>(
 /// * `tensor` - The input tensor.
 /// * `dim` - The axis along which to sort.
 /// * `descending` - The sorting order.
+/// * `indices_dtype` - The indices tensor dtype.
 ///
 /// # Returns
 ///
@@ -103,22 +108,27 @@ pub fn sort_data<B: Backend, E: ElementOrdered>(
 /// Ideally, it is supposed to be implemented by the backend and the backend implementation will be resolved
 /// by static dispatch. It is not designed for direct usage by users, and not recommended to import
 /// or use this function directly.
-pub fn sort_with_indices<B: Backend, K: BasicOps<B>>(
-    tensor: K::Primitive,
+pub fn sort_with_indices<B, T, ID, FD>(
+    tensor: T,
     dim: usize,
     descending: bool,
-) -> (K::Primitive, IntTensor<B>) {
-    let device = K::device(&tensor);
-    let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
-    let data = try_read_sync(K::into_data_async(tensor))
-        .expect(msg)
-        .expect(msg);
-
+    indices_dtype: IntDType,
+    device: Device<B>,
+    into_data: ID,
+    from_data: FD,
+) -> (T, IntTensor<B>)
+where
+    B: Backend,
+    ID: Fn(T) -> TensorData,
+    FD: Fn(TensorData, &Device<B>, DType) -> T,
+{
+    let data = into_data(tensor);
+    let dtype = data.dtype;
     let (values, indices) = sort_dispatch_dtype!(sort_data_with_indices, data, dim, descending);
 
     (
-        K::from_data(values, &device),
-        B::int_from_data(indices, &device),
+        from_data(values, &device, dtype),
+        B::int_from_data(indices.convert_dtype(indices_dtype.into()), &device),
     )
 }
 
@@ -186,6 +196,7 @@ fn sort_data_with_indices<B: Backend, E: ElementOrdered>(
 /// * `tensor` - The input tensor.
 /// * `dim` - The axis along which to sort.
 /// * `descending` - The sorting order.
+/// * `out_dtype` - The output tensor dtype.
 ///
 /// # Returns
 ///
@@ -197,19 +208,21 @@ fn sort_data_with_indices<B: Backend, E: ElementOrdered>(
 /// Ideally, it is supposed to be implemented by the backend and the backend implementation will be resolved
 /// by static dispatch. It is not designed for direct usage by users, and not recommended to import
 /// or use this function directly.
-pub fn argsort<B: Backend, K: BasicOps<B>>(
-    tensor: K::Primitive,
+pub fn argsort<B, T, ID>(
+    tensor: T,
     dim: usize,
     descending: bool,
-) -> IntTensor<B> {
-    let device = K::device(&tensor);
-    let msg = "Failed to synchronously read tensor data. This operation is not supported until this backend has a GPU sorting implementation.";
-    let data = try_read_sync(K::into_data_async(tensor))
-        .expect(msg)
-        .expect(msg);
-
+    out_dtype: IntDType,
+    device: Device<B>,
+    into_data: ID,
+) -> IntTensor<B>
+where
+    B: Backend,
+    ID: Fn(T) -> TensorData,
+{
+    let data = into_data(tensor);
     let data = sort_dispatch_dtype!(argsort_data, data, dim, descending);
-    B::int_from_data(data, &device)
+    B::int_from_data(data.convert_dtype(out_dtype.into()), &device)
 }
 
 fn argsort_data<B: Backend, E: ElementOrdered>(

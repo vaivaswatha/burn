@@ -166,18 +166,6 @@ pub fn calculate_conv_output_sizes(
         .collect()
 }
 
-/// Calculate the expected output size when doing a transposed convolution operation.
-pub fn calculate_conv_transpose_output_size(
-    kernel_size: usize,
-    stride: usize,
-    padding: usize,
-    padding_out: usize,
-    dilation: usize,
-    size_in: usize,
-) -> usize {
-    (size_in - 1) * stride + (dilation * (kernel_size - 1) + 1) + padding_out - 2 * padding
-}
-
 /// Calculate the expected output size when doing a pooling operation.
 ///
 /// # Arguments
@@ -205,6 +193,56 @@ pub fn calculate_pool_output_size(
         // Floor division (default)
         numerator / stride + 1
     }
+}
+
+/// Calculate the expected output size when doing a transposed convolution operation.
+pub fn calculate_conv_transpose_output_size(
+    kernel_size: usize,
+    stride: usize,
+    padding: usize,
+    padding_out: usize,
+    dilation: usize,
+    size_in: usize,
+) -> usize {
+    (size_in - 1) * stride + (dilation * (kernel_size - 1) + 1) + padding_out - 2 * padding
+}
+
+/// Calculate the original input size that was used for a transposed convolution.
+/// This is used during the backward pass to recover the correct gradient shape.
+fn calculate_conv_transpose_input_size(
+    kernel_size: usize,
+    stride: usize,
+    padding: usize,
+    padding_out: usize,
+    dilation: usize,
+    size_out: usize,
+) -> usize {
+    // We solve the forward formula for size_in:
+    // size_out = (size_in - 1) * stride + (dilation * (kernel_size - 1) + 1) + padding_out - 2 * padding
+    (size_out + 2 * padding - dilation * (kernel_size - 1) - padding_out - 1) / stride + 1
+}
+
+/// Calculate the original input sizes that were used for a transposed convolution.
+fn calculate_conv_transpose_input_sizes<const D: usize>(
+    kernel_size: [usize; D],
+    stride: [usize; D],
+    padding: [usize; D],
+    padding_out: [usize; D],
+    dilation: [usize; D],
+    size_out: [usize; D],
+) -> [usize; D] {
+    let mut res = [0; D];
+    for i in 0..D {
+        res[i] = calculate_conv_transpose_input_size(
+            kernel_size[i],
+            stride[i],
+            padding[i],
+            padding_out[i],
+            dilation[i],
+            size_out[i],
+        );
+    }
+    res
 }
 
 /// Calculate the [1D convolution](crate::ops::ModuleOps::conv1d) backward pass, returning the gradient for `x`.
@@ -474,7 +512,10 @@ pub(crate) fn conv_transpose1d_x_backward<B: Backend>(
     output_grad: FloatTensor<B>,
     options: ConvTransposeOptions<1>,
 ) -> FloatTensor<B> {
-    B::conv1d(
+    let [batch_size, _c_out, out_length] = output_grad.shape().dims();
+    let [c_in, _c_out_groups, kernel_size] = weight.shape().dims();
+
+    let grad = B::conv1d(
         output_grad,
         weight,
         None,
@@ -484,6 +525,28 @@ pub(crate) fn conv_transpose1d_x_backward<B: Backend>(
             options.dilation,
             options.groups,
         ),
+    );
+
+    if options.padding_out[0] == 0 {
+        return grad;
+    }
+
+    let exp_length = calculate_conv_transpose_input_size(
+        kernel_size,
+        options.stride[0],
+        options.padding[0],
+        options.padding_out[0],
+        options.dilation[0],
+        out_length,
+    );
+
+    B::float_slice(
+        grad,
+        &[
+            Slice::from(0..batch_size),
+            Slice::from(0..c_in),
+            Slice::from(0..exp_length),
+        ],
     )
 }
 
@@ -531,7 +594,10 @@ pub(crate) fn conv_transpose2d_x_backward<B: Backend>(
     output_grad: FloatTensor<B>,
     options: ConvTransposeOptions<2>,
 ) -> FloatTensor<B> {
-    B::conv2d(
+    let [batch_size, _c_out, out_h, out_w] = output_grad.shape().dims();
+    let [c_in, _c_out_groups, k_h, k_w] = weight.shape().dims();
+
+    let grad = B::conv2d(
         output_grad,
         weight,
         None,
@@ -541,6 +607,29 @@ pub(crate) fn conv_transpose2d_x_backward<B: Backend>(
             options.dilation,
             options.groups,
         ),
+    );
+
+    if options.padding_out[0] == 0 && options.padding_out[1] == 0 {
+        return grad;
+    }
+
+    let [exp_h, exp_w] = calculate_conv_transpose_input_sizes(
+        [k_h, k_w],
+        options.stride,
+        options.padding,
+        options.padding_out,
+        options.dilation,
+        [out_h, out_w],
+    );
+
+    B::float_slice(
+        grad,
+        &[
+            Slice::from(0..batch_size),
+            Slice::from(0..c_in),
+            Slice::from(0..exp_h),
+            Slice::from(0..exp_w),
+        ],
     )
 }
 
@@ -591,7 +680,10 @@ pub(crate) fn conv_transpose3d_x_backward<B: Backend>(
     output_grad: FloatTensor<B>,
     options: ConvTransposeOptions<3>,
 ) -> FloatTensor<B> {
-    B::conv3d(
+    let [batch_size, _c_out, out_d, out_h, out_w] = output_grad.shape().dims();
+    let [c_in, _c_out_groups, k_d, k_h, k_w] = weight.shape().dims();
+
+    let grad = B::conv3d(
         output_grad,
         weight,
         None,
@@ -601,6 +693,30 @@ pub(crate) fn conv_transpose3d_x_backward<B: Backend>(
             options.dilation,
             options.groups,
         ),
+    );
+
+    if options.padding_out[0] == 0 && options.padding_out[1] == 0 && options.padding_out[2] == 0 {
+        return grad;
+    }
+
+    let [exp_d, exp_h, exp_w] = calculate_conv_transpose_input_sizes(
+        [k_d, k_h, k_w],
+        options.stride,
+        options.padding,
+        options.padding_out,
+        options.dilation,
+        [out_d, out_h, out_w],
+    );
+
+    B::float_slice(
+        grad,
+        &[
+            Slice::from(0..batch_size),
+            Slice::from(0..c_in),
+            Slice::from(0..exp_d),
+            Slice::from(0..exp_h),
+            Slice::from(0..exp_w),
+        ],
     )
 }
 
@@ -1284,7 +1400,11 @@ fn conv_transpose3d_weight_grad_groups<B: Backend>(
     weight_grad
 }
 
-fn calculate_padding_out(
+/// Compute the `padding_out` for a transpose conv that exactly recovers the
+/// original `size_in` from `size_out`, accounting for any input elements the
+/// forward conv dropped. Shared by `conv{1,2,3}d_x_backward` and the CubeCL
+/// dgrad fallback so the two paths can't drift.
+pub fn calculate_padding_out(
     kernel_size: usize,
     stride: usize,
     padding: usize,
@@ -1296,10 +1416,15 @@ fn calculate_padding_out(
         return 0;
     }
 
-    let out = 1
-        + ((size_in + 2 * padding - dilation * (kernel_size - 1) - 1) as f64 / stride as f64).ceil()
-            as usize;
-    i64::max(0, out as i64 - size_out as i64) as usize
+    // Invert the transpose conv output formula to recover the exact number of
+    // input elements that a forward conv would drop for this (size_in, size_out).
+    //
+    // Forward: size_out = floor((size_in + 2*padding - dilated_kernel) / stride) + 1
+    // Transpose: trans_out = (size_out - 1)*stride + dilated_kernel + padding_out - 2*padding
+    // Setting trans_out == size_in and solving for padding_out:
+    let dilated_kernel = dilation * (kernel_size - 1) + 1;
+    let base = (size_out as i64 - 1) * stride as i64 + dilated_kernel as i64 - 2 * padding as i64;
+    i64::max(0, size_in as i64 - base) as usize
 }
 
 #[cfg(test)]

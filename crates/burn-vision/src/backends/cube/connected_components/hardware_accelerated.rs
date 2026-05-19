@@ -4,15 +4,15 @@
 //! DASIP, 2018
 
 use crate::{
-    ConnectedStatsOptions, ConnectedStatsPrimitive, Connectivity,
-    backends::cube::connected_components::stats_from_opts,
+    ConnectedStatsOptions, Connectivity, backends::cube::connected_components::stats_from_opts,
 };
+use burn_core::backend::{TensorMetadata, ops::IntTensorOps};
+use burn_core::tensor::{Shape, cast::ToElement};
 use burn_cubecl::{
     BoolElement, CubeBackend, CubeRuntime, FloatElement, IntElement, kernel,
     ops::{into_data_sync, numeric::zeros_client},
     tensor::CubeTensor,
 };
-use burn_tensor::{Shape, TensorMetadata, cast::ToElement, ops::IntTensorOps};
 use cubecl::{features::Plane, prelude::*};
 
 use super::prefix_sum::prefix_sum;
@@ -463,7 +463,12 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
 ) -> Result<
     (
         CubeTensor<R>,
-        ConnectedStatsPrimitive<CubeBackend<R, F, I, BT>>,
+        CubeTensor<R>,
+        CubeTensor<R>,
+        CubeTensor<R>,
+        CubeTensor<R>,
+        CubeTensor<R>,
+        CubeTensor<R>,
     ),
     String,
 > {
@@ -504,11 +509,10 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
             &client,
             cube_count,
             cube_dim,
-            img.as_tensor_arg(1),
-            labels.as_tensor_arg(1),
+            img.clone().into_tensor_arg(),
+            labels.clone().into_tensor_arg(),
             connectivity,
         )
-        .expect("Kernel to never fail");
     };
 
     let horizontal_warps = Ord::min((cols as u32).div_ceil(warp_size), 32);
@@ -523,11 +527,10 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
             &client,
             cube_count,
             cube_dim_merge,
-            img.as_tensor_arg(1),
-            labels.as_tensor_arg(1),
+            img.clone().into_tensor_arg(),
+            labels.clone().into_tensor_arg(),
             connectivity,
         )
-        .expect("Kernel to never fail");
     };
 
     let cube_count = CubeCount::new_2d(
@@ -535,7 +538,7 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
         (rows as u32).div_ceil(cube_dim.y),
     );
 
-    let mut stats = stats_from_opts(labels.clone(), stats_opt);
+    let mut stats = stats_from_opts::<R, F, I, BT>(labels.clone(), stats_opt);
 
     if stats_opt == ConnectedStatsOptions::none() {
         unsafe {
@@ -543,10 +546,9 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
                 &client,
                 cube_count,
                 cube_dim,
-                img.as_tensor_arg(1),
-                labels.as_tensor_arg(1),
+                img.into_tensor_arg(),
+                labels.clone().into_tensor_arg(),
             )
-            .expect("Kernel to never fail");
         };
     } else {
         unsafe {
@@ -554,24 +556,23 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
                 &client,
                 cube_count,
                 cube_dim,
-                img.as_tensor_arg(1),
-                labels.as_tensor_arg(1),
-                stats.area.as_tensor_arg(1),
-                stats.top.as_tensor_arg(1),
-                stats.left.as_tensor_arg(1),
-                stats.right.as_tensor_arg(1),
-                stats.bottom.as_tensor_arg(1),
-                stats.max_label.as_tensor_arg(1),
+                img.clone().into_tensor_arg(),
+                labels.clone().into_tensor_arg(),
+                stats.0.clone().into_tensor_arg(),
+                stats.1.clone().into_tensor_arg(),
+                stats.2.clone().into_tensor_arg(),
+                stats.3.clone().into_tensor_arg(),
+                stats.4.clone().into_tensor_arg(),
+                stats.5.clone().into_tensor_arg(),
                 stats_opt,
             )
-            .expect("Kernel to never fail");
         };
         if stats_opt.compact_labels {
-            let max_label = CubeBackend::<R, F, I, BT>::int_max(stats.max_label);
+            let max_label = CubeBackend::<R, F, I, BT>::int_max(stats.5);
             let max_label = into_data_sync::<R>(max_label);
             let max_label = ToElement::to_usize(&max_label.as_slice::<I>().unwrap()[0]);
             let sliced = kernel::slice::<R>(
-                stats.area.clone(),
+                stats.0.clone(),
                 #[allow(clippy::single_range_in_vec_init)]
                 &[0..(max_label + 1).next_multiple_of(4)],
             );
@@ -582,18 +583,17 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
                 (cols as u32).div_ceil(cube_dim.x),
                 (rows as u32).div_ceil(cube_dim.y),
             );
-            stats.max_label =
+            stats.5 =
                 zeros_client::<R>(client.clone(), device.clone(), Shape::new([1]), I::dtype());
             unsafe {
                 compact_labels::launch_unchecked::<I, R>(
                     &client,
                     cube_count,
                     cube_dim,
-                    labels.as_tensor_arg(1),
-                    relabel.as_tensor_arg(1),
-                    stats.max_label.as_tensor_arg(1),
+                    labels.clone().into_tensor_arg(),
+                    relabel.clone().into_tensor_arg(),
+                    stats.5.clone().into_tensor_arg(),
                 )
-                .expect("Kernel to never fail");
             };
 
             let cube_dim = CubeDim::new_1d(256);
@@ -603,22 +603,21 @@ pub fn hardware_accelerated<R: CubeRuntime, F: FloatElement, I: IntElement, BT: 
                     &client,
                     cube_count,
                     cube_dim,
-                    stats.area.copy().as_tensor_arg(1),
-                    stats.area.as_tensor_arg(1),
-                    stats.top.copy().as_tensor_arg(1),
-                    stats.top.as_tensor_arg(1),
-                    stats.left.copy().as_tensor_arg(1),
-                    stats.left.as_tensor_arg(1),
-                    stats.right.copy().as_tensor_arg(1),
-                    stats.right.as_tensor_arg(1),
-                    stats.bottom.copy().as_tensor_arg(1),
-                    stats.bottom.as_tensor_arg(1),
-                    relabel.as_tensor_arg(1),
+                    stats.0.copy().into_tensor_arg(),
+                    stats.0.clone().into_tensor_arg(),
+                    stats.1.copy().into_tensor_arg(),
+                    stats.1.clone().into_tensor_arg(),
+                    stats.2.copy().into_tensor_arg(),
+                    stats.2.clone().into_tensor_arg(),
+                    stats.3.copy().into_tensor_arg(),
+                    stats.3.clone().into_tensor_arg(),
+                    stats.4.copy().into_tensor_arg(),
+                    stats.4.clone().into_tensor_arg(),
+                    relabel.into_tensor_arg(),
                 )
-                .expect("Kernel to never fail");
             };
         }
     }
 
-    Ok((labels, stats))
+    Ok((labels, stats.0, stats.1, stats.2, stats.3, stats.4, stats.5))
 }

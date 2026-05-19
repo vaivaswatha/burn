@@ -2,7 +2,7 @@ use core::{marker::PhantomData, mem::transmute};
 
 use crate::{SharedArray, iter_range_par, run_par, sharing::UnsafeSharedRef};
 
-use burn_backend::{DType, Element, quantization::QuantValue};
+use burn_backend::{BoolStore, DType, Element, quantization::QuantValue};
 use macerator::{Simd, VOrd};
 use ndarray::{Array4, s};
 use nhwc::max_pool2d_nhwc;
@@ -31,7 +31,7 @@ macro_rules! launch_kernel {
             DType::U32 if is_accelerated::<u32>() => Ok(cast($func::<u32>(cast($x), $($arg),*))),
             DType::U16 if is_accelerated::<u16>() => Ok(cast($func::<u16>(cast($x), $($arg),*))),
             DType::U8 if is_accelerated::<u8>() => Ok(cast($func::<u8>(cast($x), $($arg),*))),
-            DType::Bool if is_accelerated::<u8>() => Ok(cast($func::<u8>(cast($x), $($arg),*))),
+            DType::Bool(BoolStore::Native) if is_accelerated::<u8>() => Ok(cast($func::<u8>(cast($x), $($arg),*))),
             DType::QFloat(scheme) => match scheme.value {
                 QuantValue::Q8F | QuantValue::Q8S if is_accelerated::<i8>() => Ok(cast($func::<i8>(cast($x), $($arg),*))),
                 _ => Err($x)
@@ -61,6 +61,7 @@ fn cast<T, E>(tensor: SharedArray<T>) -> SharedArray<E> {
 }
 
 mod nhwc {
+    use burn_backend::ElementOrdered;
     use itertools::Itertools;
     use macerator::{Simd, vload_unaligned, vstore_unaligned};
     use ndarray::{ArrayView3, ArrayViewMut3, Ix4};
@@ -74,7 +75,7 @@ mod nhwc {
     // The most common config (x86-v3) has 16 registers, so use half of them for accumulators.
     const BLOCK_REGISTERS: usize = 8;
 
-    pub(crate) fn max_pool2d_nhwc<E: Element + VOrd + MinMax>(
+    pub(crate) fn max_pool2d_nhwc<E: ElementOrdered + VOrd + MinMax>(
         x: SharedArray<E>,
         kernel_size: [usize; 2],
         stride: [usize; 2],
@@ -162,7 +163,7 @@ mod nhwc {
     )]
     #[inline(always)]
     #[macerator::with_simd]
-    fn loop_blocked<'a, S: Simd, E: Element + VOrd + MinMax>(
+    fn loop_blocked<'a, S: Simd, E: ElementOrdered + VOrd + MinMax>(
         x: ArrayView3<'a, E>,
         mut out: ArrayViewMut3<'a, E>,
         kernel_size: [usize; 2],
@@ -276,7 +277,7 @@ mod nhwc {
     #[allow(clippy::too_many_arguments, unused_mut)]
     #[inline(always)]
     #[macerator::with_simd]
-    unsafe fn loop_unblocked<'a, S: Simd, E: Element + VOrd + MinMax>(
+    unsafe fn loop_unblocked<'a, S: Simd, E: ElementOrdered + VOrd + MinMax>(
         x: ArrayView3<'a, E>,
         mut out: ArrayViewMut3<'a, E>,
         kernel_size: [usize; 2],
@@ -349,7 +350,7 @@ mod nhwc {
         }
     }
 
-    fn loop_scalar<E: Element + MinMax>(
+    fn loop_scalar<E: ElementOrdered + MinMax>(
         x: ArrayView3<'_, E>,
         mut out: ArrayViewMut3<'_, E>,
         kernel_size: [usize; 2],

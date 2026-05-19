@@ -54,6 +54,9 @@ impl NumOperations for TestOptimization {
     fn len(&self) -> usize {
         self.size
     }
+    fn name(&self) -> &'static str {
+        "TestOptimization"
+    }
 }
 
 /// A fake [stream segment](StreamSegment) for testing purpose.
@@ -76,7 +79,11 @@ impl ExecutionStrategy<TestOptimization> {
     /// Only use it for testing, to easily create ordered strategies.
     pub fn optimization(opt: TestOptimization) -> Self {
         let ordering = Arc::new((0..opt.size).collect());
-        Self::Optimization { opt, ordering }
+        Self::Optimization {
+            opt,
+            ordering,
+            score: 1,
+        }
     }
 }
 
@@ -477,7 +484,7 @@ impl TestStream {
 
     /// Assert the number of executions since the start of the stream.
     fn assert_number_of_executions(&self, number: usize) {
-        assert_eq!(self.executed.len(), number);
+        assert_eq!(self.executed.len(), number, "Number of execution match");
     }
 
     /// Assert the number of operations queued.
@@ -552,7 +559,7 @@ impl OperationFuser<TestOptimization> for TestOptimizationBuilder {
 
         // Optimization possible.
         FuserProperties {
-            score: 1,
+            score: self.expected_operations.len() as u64,
             ready: true,
         }
     }

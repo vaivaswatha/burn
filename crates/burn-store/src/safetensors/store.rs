@@ -14,8 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use burn_core::module::ParamId;
-use burn_tensor::backend::Backend;
-use burn_tensor::{DType, TensorData};
+use burn_core::tensor::{BoolStore, DType, TensorData};
 use core::fmt;
 use core::ops::Deref;
 use hashbrown::HashMap;
@@ -610,10 +609,7 @@ impl safetensors::View for TensorSnapshotAdapter {
 impl ModuleStore for SafetensorsStore {
     type Error = SafetensorsStoreError;
 
-    fn collect_from<B: Backend, M: ModuleSnapshot<B>>(
-        &mut self,
-        module: &M,
-    ) -> Result<(), Self::Error> {
+    fn collect_from<M: ModuleSnapshot>(&mut self, module: &M) -> Result<(), Self::Error> {
         // Invalidate cache since we're writing new data
         match self {
             #[cfg(feature = "std")]
@@ -683,10 +679,7 @@ impl ModuleStore for SafetensorsStore {
         }
     }
 
-    fn apply_to<B: Backend, M: ModuleSnapshot<B>>(
-        &mut self,
-        module: &mut M,
-    ) -> Result<ApplyResult, Self::Error> {
+    fn apply_to<M: ModuleSnapshot>(&mut self, module: &mut M) -> Result<ApplyResult, Self::Error> {
         // Get snapshots from cache
         let snapshots: Vec<TensorSnapshot> = self.get_all_snapshots()?.values().cloned().collect();
 
@@ -928,7 +921,7 @@ fn safetensors_to_snapshots_lazy(
     for (name, tensor_snapshot) in tensors.tensors() {
         // Extract metadata without materializing data
         let dtype = safetensor_dtype_to_burn(tensor_snapshot.dtype())?;
-        let shape = tensor_snapshot.shape().to_vec();
+        let shape = tensor_snapshot.shape();
         let path_parts: Vec<String> = name.split('.').map(|s| s.to_string()).collect();
 
         // Create a lazy closure that will deserialize only this tensor when needed
@@ -955,10 +948,10 @@ fn safetensors_to_snapshots_lazy(
             })?;
 
             // Now materialize just this tensor's data
-            let bytes = burn_tensor::Bytes::from_bytes_vec(tensor.data().to_vec());
+            let bytes = burn_core::tensor::Bytes::from_bytes_vec(tensor.data().to_vec());
             Ok(TensorData {
                 bytes,
-                shape: tensor.shape().to_vec(),
+                shape: tensor.shape().into(),
                 dtype: safetensor_dtype_to_burn(tensor.dtype())
                     .map_err(|_| crate::TensorSnapshotError::DataError("Invalid dtype".into()))?,
             })
@@ -967,7 +960,7 @@ fn safetensors_to_snapshots_lazy(
         let snapshot = TensorSnapshot::from_closure(
             data_fn,
             dtype,
-            shape,
+            shape.into(),
             path_parts,
             vec![], // Empty container_stack - will be filled during module traversal
             ParamId::new(),
@@ -998,7 +991,7 @@ fn safetensors_to_snapshots_lazy_file(
 
     for (name, tensor_snapshot) in tensors.tensors() {
         let dtype = safetensor_dtype_to_burn(tensor_snapshot.dtype())?;
-        let shape = tensor_snapshot.shape().to_vec();
+        let shape = tensor_snapshot.shape();
         let path_parts: Vec<String> = name.split('.').map(|s| s.to_string()).collect();
 
         // Create a lazy closure that accesses the mmap'd data
@@ -1019,8 +1012,8 @@ fn safetensors_to_snapshots_lazy_file(
 
             // Only now do we actually copy the tensor data
             Ok(TensorData {
-                bytes: burn_tensor::Bytes::from_bytes_vec(tensor.data().to_vec()),
-                shape: tensor.shape().to_vec(),
+                bytes: burn_core::tensor::Bytes::from_bytes_vec(tensor.data().to_vec()),
+                shape: tensor.shape().into(),
                 dtype: safetensor_dtype_to_burn(tensor.dtype())
                     .map_err(|_| crate::TensorSnapshotError::DataError("Invalid dtype".into()))?,
             })
@@ -1029,7 +1022,7 @@ fn safetensors_to_snapshots_lazy_file(
         let snapshot = TensorSnapshot::from_closure(
             data_fn,
             dtype,
-            shape,
+            shape.into(),
             path_parts,
             vec![], // Empty container_stack - will be filled during module traversal
             ParamId::new(),
@@ -1056,7 +1049,7 @@ fn safetensor_dtype_to_burn(dtype: safetensors::Dtype) -> Result<DType, Safetens
         Dtype::U64 => Ok(DType::U64),
         Dtype::U32 => Ok(DType::U32),
         Dtype::U8 => Ok(DType::U8),
-        Dtype::BOOL => Ok(DType::Bool),
+        Dtype::BOOL => Ok(DType::Bool(BoolStore::Native)),
         _ => Err(SafetensorsStoreError::Other(format!(
             "Unsupported dtype: {:?}",
             dtype
@@ -1083,7 +1076,9 @@ fn dtype_to_safetensors(dtype: DType) -> Result<safetensors::Dtype, SafetensorsS
             "U16 dtype not yet supported in safetensors".to_string(),
         )),
         DType::U8 => Ok(Dtype::U8),
-        DType::Bool => Ok(Dtype::BOOL),
+        DType::Bool(BoolStore::Native) => Ok(Dtype::BOOL),
+        DType::Bool(BoolStore::U32) => Ok(Dtype::U32),
+        DType::Bool(BoolStore::U8) => Ok(Dtype::U8),
         DType::QFloat(_) => Err(SafetensorsStoreError::Other(
             "Quantized tensors not yet supported in safetensors".to_string(),
         )),
