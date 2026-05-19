@@ -12,9 +12,7 @@ use burn_tensor::{
 };
 use pliron::{
     builtin::{
-        attributes::IntegerAttr,
-        op_interfaces::OneResultInterface,
-        types::{IntegerType, Signedness},
+        attributes::{FPDoubleAttr, IntegerAttr}, op_interfaces::OneResultInterface, types::{IntegerType, Signedness}
     },
     irbuild::inserter::Inserter,
     utils::apint::APInt,
@@ -259,7 +257,28 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn float_recip(tensor: PlironFloatTensor) -> PlironFloatTensor {
-        todo!()
+        assert!(is_pliron_ir_initialized());
+        PLIRON_IR.with_borrow_mut(|ir| {
+            let ir = ir.as_mut().unwrap();
+            let tensor_ty = build_ranked_tensor_type(&mut ir.ctx, tensor.dtype(), &tensor.shape);
+            let generate_ones = pliron_tensor::tensor::ops::GenerateOp::new(&mut ir.ctx, vec![], tensor_ty,
+                |ctx, _state, inserter, _indices| {
+                    let one_attr = FPDoubleAttr::from(1.0);
+                    let return_one = pliron_llvm::ops::ConstantOp::new(ctx, Box::new(one_attr));
+                    inserter.insert_op(ctx, return_one);
+                    return_one.get_result(ctx)
+                },
+                ()
+            );
+            ir.inserter.insert_op(&ir.ctx, generate_ones);
+            let ones = generate_ones.get_result(&ir.ctx);
+            let recip = pliron_tensor::tensor::ops::DivOp::new(&mut ir.ctx, ones, tensor.value);
+            ir.inserter.insert_op(&ir.ctx, recip);
+            PlironFloatTensor {
+                 shape: tensor.shape.clone(),
+                 value: recip.get_result(&ir.ctx),
+            }
+        })
     }
 
     fn float_swap_dims(tensor: PlironFloatTensor, dim1: usize, dim2: usize) -> PlironFloatTensor {
