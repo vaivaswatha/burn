@@ -25,6 +25,7 @@ default = [
     "burn-cuda?/default",
     "burn-flex?/default",
     "burn-ndarray/default",
+    "burn-pliron?/default",
     "burn-rocm?/default",
     "burn-tch?/default",
     "burn-wgpu?/default",
@@ -37,6 +38,7 @@ std = [
     "burn-cuda?/std",
     "burn-flex?/std",
     "burn-ndarray/std",
+    "burn-pliron?/std",
     "burn-rocm?/std",
     "burn-tch?/std",
     "burn-wgpu?/std",
@@ -47,6 +49,7 @@ tracing = [
     "burn-cuda?/tracing",
     "burn-flex?/tracing",
     "burn-ndarray/tracing",
+    "burn-pliron?/tracing",
     "burn-rocm?/tracing",
     "burn-tch?/tracing",
     "burn-wgpu?/tracing",
@@ -63,6 +66,7 @@ distributed = [
 # Backends
 cuda = ["burn-cuda"]
 flex = ["burn-flex"]
+pliron = ["burn-pliron"]
 rocm = ["burn-rocm"]
 ndarray = [] # default
 tch = ["burn-tch"]
@@ -104,6 +108,7 @@ burn-cuda = { workspace = true, optional = true }
 burn-flex = { workspace = true, optional = true }
 # TODO: switch to flex but it's not supported on targets without atomic CAS unless `critical_section` is enabled
 burn-ndarray = { workspace = true }
+burn-pliron = { workspace = true, optional = true }
 burn-tch = { workspace = true, optional = true }
 burn-rocm = { workspace = true, optional = true }
 burn-wgpu = { workspace = true, optional = true }

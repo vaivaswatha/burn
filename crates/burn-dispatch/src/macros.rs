@@ -12,6 +12,7 @@ macro_rules! backend_list {
             [Wgpu, wgpu_webgpu],
             [Flex, feature = "flex"],
             [NdArray, any(feature = "ndarray", default_backend)],
+            [Pliron, feature = "pliron"],
             [LibTorch, feature = "tch"]
         }
     };
@@ -22,15 +23,16 @@ macro_rules! backend_matrix {
     ($callback:ident, $($extra:tt)*) => {
         $callback! {
             $($extra)*;
-            [Cpu, feature = "cpu"] => [[Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Cuda, feature = "cuda"] => [[Cpu, feature = "cpu"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Metal, wgpu_metal] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Rocm, feature = "rocm"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Vulkan, wgpu_vulkan] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Wgpu, wgpu_webgpu] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [Flex, feature = "flex"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
-            [NdArray, any(feature = "ndarray", default_backend)] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [LibTorch, feature = "tch"]];
-            [LibTorch, feature = "tch"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"]]
+            [Cpu, feature = "cpu"] => [[Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Cuda, feature = "cuda"] => [[Cpu, feature = "cpu"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Metal, wgpu_metal] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Rocm, feature = "rocm"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Vulkan, wgpu_vulkan] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Wgpu, wgpu_webgpu] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Rocm, feature = "rocm"], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Flex, feature = "flex"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [NdArray, any(feature = "ndarray", default_backend)] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [Pliron, feature = "pliron"], [LibTorch, feature = "tch"]];
+            [Pliron, feature = "pliron"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [LibTorch, feature = "tch"]];
+            [LibTorch, feature = "tch"] => [[Cpu, feature = "cpu"], [Cuda, feature = "cuda"], [Metal, wgpu_metal], [Rocm, feature = "rocm"], [Vulkan, wgpu_vulkan], [Wgpu, wgpu_webgpu], [Flex, feature = "flex"], [NdArray, feature = "ndarray"], [Pliron, feature = "pliron"]]
         }
     };
 }
@@ -154,6 +156,19 @@ macro_rules! to_device_arms {
                     }
                 )+
             )*
+            #[cfg(all(feature = "pliron", any(feature = "ndarray", default_backend)))]
+            ($crate::DispatchTensorKind::Pliron(t), $crate::DispatchDevice::NdArray($device_ident)) => {
+                type B1 = Pliron<f32>;
+                type B2 = NdArray<f32>;
+                let $inner = t.$inner_fn();
+
+                $crate::DispatchTensor {
+                    kind: $crate::DispatchTensorKind::NdArray(
+                        $crate::BackendTensor::$kind($body)
+                    ),
+                    checkpointing: $tensor.checkpointing,
+                }
+            }
             // --- To autodiff ---
             // This can happen when moving a bool or int tensor to the device of a float autodiff tensor.
             // We move it to the inner device and preserve the checkpointing strategy.
@@ -268,6 +283,17 @@ macro_rules! float_to_device_arms {
                     }
                 )+
             )*
+            #[cfg(all(feature = "pliron", any(feature = "ndarray", default_backend)))]
+            ($crate::DispatchTensorKind::Pliron(kind), $crate::DispatchDevice::NdArray($device_ident)) => {
+                type B1 = Pliron<f32>;
+                type B2 = NdArray<f32>;
+                let $inner = kind.float();
+
+                $crate::DispatchTensor {
+                    kind: $crate::DispatchTensorKind::NdArray($crate::BackendTensor::Float($body)),
+                    checkpointing: $tensor.checkpointing,
+                }
+            }
             #[cfg(feature = "autodiff")]
             ($crate::DispatchTensorKind::Autodiff(..), _) | (_, $crate::DispatchDevice::Autodiff(_)) => panic!("Cannot move between autodiff and non-autodiff instances.")
         }

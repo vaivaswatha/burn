@@ -180,6 +180,8 @@ impl AutodiffBackend for Dispatch {
                 DispatchTensorKind::Flex(tensor) => tensor.autodiff().backward(),
                 #[cfg(any(feature = "ndarray", default_backend))]
                 DispatchTensorKind::NdArray(tensor) => tensor.autodiff().backward(),
+                #[cfg(feature = "pliron")]
+                DispatchTensorKind::Pliron(tensor) => tensor.autodiff().backward(),
                 #[cfg(feature = "tch")]
                 DispatchTensorKind::LibTorch(tensor) => tensor.autodiff().backward(),
                 DispatchTensorKind::Autodiff(_) => {
@@ -237,6 +239,11 @@ impl AutodiffBackend for Dispatch {
                     .as_autodiff()
                     .grad(grads)
                     .map(|t| DispatchTensorKind::NdArray(crate::BackendTensor::Float(t))),
+                #[cfg(feature = "pliron")]
+                DispatchTensorKind::Pliron(tensor) => tensor
+                    .as_autodiff()
+                    .grad(grads)
+                    .map(|t| DispatchTensorKind::Pliron(crate::BackendTensor::Float(t))),
                 #[cfg(feature = "tch")]
                 DispatchTensorKind::LibTorch(tensor) => tensor
                     .as_autodiff()
@@ -301,6 +308,11 @@ impl AutodiffBackend for Dispatch {
                     .as_autodiff()
                     .grad_remove(grads)
                     .map(|t| DispatchTensorKind::NdArray(crate::BackendTensor::Float(t))),
+                #[cfg(feature = "pliron")]
+                DispatchTensorKind::Pliron(tensor) => tensor
+                    .as_autodiff()
+                    .grad_remove(grads)
+                    .map(|t| DispatchTensorKind::Pliron(crate::BackendTensor::Float(t))),
                 #[cfg(feature = "tch")]
                 DispatchTensorKind::LibTorch(tensor) => tensor
                     .as_autodiff()
@@ -363,6 +375,10 @@ impl AutodiffBackend for Dispatch {
                 (DispatchTensorKind::NdArray(tensor), DispatchTensorKind::NdArray(grad)) => {
                     tensor.as_autodiff().grad_replace(grads, grad.float())
                 }
+                #[cfg(feature = "pliron")]
+                (DispatchTensorKind::Pliron(tensor), DispatchTensorKind::Pliron(grad)) => {
+                    tensor.as_autodiff().grad_replace(grads, grad.float())
+                }
                 (DispatchTensorKind::Autodiff(_), _) => {
                     panic!("Autodiff should not wrap an autodiff tensor.")
                 }
@@ -412,6 +428,10 @@ impl AutodiffBackend for Dispatch {
                 ),
                 #[cfg(any(feature = "ndarray", default_backend))]
                 DispatchTensorKind::NdArray(tensor) => DispatchTensorKind::NdArray(
+                    crate::BackendTensor::Float(tensor.autodiff().primitive),
+                ),
+                #[cfg(feature = "pliron")]
+                DispatchTensorKind::Pliron(tensor) => DispatchTensorKind::Pliron(
                     crate::BackendTensor::Float(tensor.autodiff().primitive),
                 ),
                 #[cfg(feature = "tch")]
@@ -508,6 +528,12 @@ impl AutodiffBackend for Dispatch {
             DispatchTensorKind::Autodiff(_) => {
                 panic!("Autodiff should not wrap an autodiff tensor.")
             }
+            #[cfg(feature = "pliron")]
+            DispatchTensorKind::Pliron(backend_tensor) => DispatchTensorKind::Autodiff(Box::new(
+                DispatchTensorKind::Pliron(crate::BackendTensor::Autodiff(
+                    Autodiff::<Pliron>::from_inner(backend_tensor.float()),
+                )),
+            )),
         };
         DispatchTensor {
             kind,
@@ -606,6 +632,8 @@ impl DispatchTensorKind {
             DispatchTensorKind::Flex(tensor) => DispatchDevice::Flex(tensor.device()),
             #[cfg(any(feature = "ndarray", default_backend))]
             DispatchTensorKind::NdArray(tensor) => DispatchDevice::NdArray(tensor.device()),
+            #[cfg(feature = "pliron")]
+            DispatchTensorKind::Pliron(tensor) => DispatchDevice::Pliron(tensor.device()),
             #[cfg(feature = "tch")]
             DispatchTensorKind::LibTorch(tensor) => DispatchDevice::LibTorch(tensor.device()),
             #[cfg(feature = "autodiff")]
@@ -670,6 +698,10 @@ impl Dispatch {
             DispatchDevice::NdArray(_) => {
                 <QuantizedTensor<NdArray> as QTensorPrimitive>::default_scheme()
             }
+            #[cfg(feature = "pliron")]
+            DispatchDevice::Pliron(_) => {
+                <QuantizedTensor<Pliron> as QTensorPrimitive>::default_scheme()
+            }
             #[cfg(feature = "tch")]
             DispatchDevice::LibTorch(_) => {
                 <QuantizedTensor<LibTorch> as QTensorPrimitive>::default_scheme()
@@ -709,6 +741,8 @@ impl Dispatch {
             DispatchDeviceId::Flex => vec![FlexDevice.into()],
             #[cfg(any(feature = "ndarray", default_backend))]
             DispatchDeviceId::NdArray => vec![NdArrayDevice::Cpu.into()],
+            #[cfg(feature = "pliron")]
+            DispatchDeviceId::Pliron => vec![PlironDevice::default().into()],
             #[cfg(feature = "tch")]
             DispatchDeviceId::LibTorch => (0..LibTorch::<f32>::device_count(0))
                 .map(|i| LibTorchDevice::Cuda(i).into())

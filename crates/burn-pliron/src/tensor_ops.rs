@@ -3,16 +3,19 @@
 
 use std::num::NonZero;
 
-use burn_tensor::{
-    TensorData, TensorMetadata,
+use burn_backend::{
+    TensorMetadata,
     ops::{
         ActivationOps, BoolTensorOps, FloatTensorOps, IntTensorOps, ModuleOps, QTensorOps,
         TransactionOps,
     },
 };
+use burn_std::{Shape, TensorData};
 use pliron::{
     builtin::{
-        attributes::{FPDoubleAttr, IntegerAttr}, op_interfaces::OneResultInterface, types::{IntegerType, Signedness}
+        attributes::{FPSingleAttr, IntegerAttr},
+        op_interfaces::OneResultInterface,
+        types::{IntegerType, Signedness},
     },
     irbuild::inserter::Inserter,
     utils::apint::APInt,
@@ -21,16 +24,17 @@ use pliron_llvm::op_interfaces::CastOpInterface;
 use pliron_tensor::tensor::runtime_utils::TensorDesciptor;
 
 use crate::{
-    PlironBackend, PlironBoolTensor, PlironDevice, PlironFloatTensor, PlironIntTensor,
-    PlironQTensor,
+    Pliron, PlironBoolTensor, PlironDevice, PlironFloatTensor, PlironIntTensor, PlironQTensor,
     ir_interface::{
         PLIRON_IR, build_ranked_tensor_type, clear_pliron_ir, exec_pliron_ir, init_pliron_ir,
         is_pliron_ir_initialized, to_pliron_tensor_descriptor,
     },
 };
 
-impl FloatTensorOps<PlironBackend> for PlironBackend {
-    fn float_from_data(data: burn_tensor::TensorData, device: &PlironDevice) -> PlironFloatTensor {
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    FloatTensorOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
+    fn float_from_data(data: TensorData, device: &PlironDevice) -> PlironFloatTensor {
         init_pliron_ir();
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
@@ -52,17 +56,17 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
             ir.tensor_descriptors.push(tensor_data_addr);
             let addr_attr = IntegerAttr::new(i64_ty, addr_attr_val);
             let const_op = pliron_llvm::ops::ConstantOp::new(&mut ir.ctx, Box::new(addr_attr));
-            ir.inserter.insert_op(&ir.ctx, const_op);
+            ir.inserter.insert_op(&ir.ctx, &const_op);
             let ptr_ty = pliron_llvm::types::PointerType::get(&mut ir.ctx);
             let const_addr = const_op.get_result(&ir.ctx);
             let int_to_ptr =
                 pliron_llvm::ops::IntToPtrOp::new(&mut ir.ctx, const_addr, ptr_ty.into());
-            ir.inserter.insert_op(&mut ir.ctx, int_to_ptr);
+            ir.inserter.insert_op(&mut ir.ctx, &int_to_ptr);
             // Load the tensor data as a pliron value. The load op will have the tensor type as its result type,
             // and the pointer to the tensor data as its operand.
             let ptr_val = int_to_ptr.get_result(&ir.ctx);
             let load_op = pliron_llvm::ops::LoadOp::new(&mut ir.ctx, ptr_val, tensor_ty.into());
-            ir.inserter.insert_op(&mut ir.ctx, load_op);
+            ir.inserter.insert_op(&mut ir.ctx, &load_op);
             PlironFloatTensor {
                 shape: shape.into(),
                 value: load_op.get_result(&ir.ctx),
@@ -71,16 +75,17 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn float_random(
-        shape: burn_tensor::Shape,
-        distribution: burn_tensor::Distribution,
+        shape: Shape,
+        distribution: burn_std::Distribution,
         device: &PlironDevice,
+        dtype: burn_std::FloatDType,
     ) -> PlironFloatTensor {
         todo!()
     }
 
     async fn float_into_data(
         tensor: PlironFloatTensor,
-    ) -> Result<burn_tensor::TensorData, burn_tensor::backend::ExecutionError> {
+    ) -> Result<TensorData, burn_backend::ExecutionError> {
         assert!(
             is_pliron_ir_initialized(),
             "Pliron IR must be initialized to convert a pliron tensor into data. \
@@ -110,21 +115,21 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
             );
             let addr_attr = IntegerAttr::new(i64_ty, addr_attr_val);
             let const_op = pliron_llvm::ops::ConstantOp::new(&mut ir.ctx, Box::new(addr_attr));
-            ir.inserter.insert_op(&mut ir.ctx, const_op);
+            ir.inserter.insert_op(&mut ir.ctx, &const_op);
             let ptr_ty = pliron_llvm::types::PointerType::get(&mut ir.ctx);
             let const_addr = const_op.get_result(&ir.ctx);
             let int_to_ptr =
                 pliron_llvm::ops::IntToPtrOp::new(&mut ir.ctx, const_addr, ptr_ty.into());
-            ir.inserter.insert_op(&mut ir.ctx, int_to_ptr);
+            ir.inserter.insert_op(&mut ir.ctx, &int_to_ptr);
             let ptr_val = int_to_ptr.get_result(&mut ir.ctx);
             // Store the tensor data to the address of the tensor descriptor.
             let store_op = pliron_llvm::ops::StoreOp::new(&mut ir.ctx, tensor.value, ptr_val);
-            ir.inserter.insert_op(&mut ir.ctx, store_op);
+            ir.inserter.insert_op(&mut ir.ctx, &store_op);
 
             // Insert a return to complete the function, so that the IR can be executed
             // and the tensor data can be read back from the tensor descriptor.
             let ret = pliron_llvm::ops::ReturnOp::new(&mut ir.ctx, None);
-            ir.inserter.insert_op(&mut ir.ctx, ret);
+            ir.inserter.insert_op(&mut ir.ctx, &ret);
 
             // Execute the IR.
             exec_pliron_ir(ir);
@@ -153,14 +158,14 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn float_into_int(tensor: PlironFloatTensor) -> PlironIntTensor {
+    fn float_into_int(tensor: PlironFloatTensor, out_dtype: burn_std::IntDType) -> PlironIntTensor {
         todo!()
     }
 
     fn float_empty(
-        shape: burn_tensor::Shape,
+        shape: Shape,
         device: &PlironDevice,
-        dtype: burn_tensor::FloatDType,
+        dtype: burn_std::FloatDType,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -170,7 +175,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
             let sum = pliron_tensor::tensor::ops::AddOp::new(&mut ir.ctx, lhs.value, rhs.value);
-            ir.inserter.insert_op(&mut ir.ctx, sum);
+            ir.inserter.insert_op(&mut ir.ctx, &sum);
             PlironFloatTensor {
                 shape: lhs.shape.clone(),
                 value: sum.get_result(&ir.ctx),
@@ -178,7 +183,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         })
     }
 
-    fn float_add_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {
+    fn float_add_scalar(lhs: PlironFloatTensor, rhs: burn_std::Scalar) -> PlironFloatTensor {
         todo!()
     }
 
@@ -187,7 +192,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
             let diff = pliron_tensor::tensor::ops::SubOp::new(&mut ir.ctx, lhs.value, rhs.value);
-            ir.inserter.insert_op(&mut ir.ctx, diff);
+            ir.inserter.insert_op(&mut ir.ctx, &diff);
             PlironFloatTensor {
                 shape: lhs.shape.clone(),
                 value: diff.get_result(&ir.ctx),
@@ -195,7 +200,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         })
     }
 
-    fn float_sub_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {
+    fn float_sub_scalar(lhs: PlironFloatTensor, rhs: burn_std::Scalar) -> PlironFloatTensor {
         todo!()
     }
 
@@ -204,7 +209,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
             let prod = pliron_tensor::tensor::ops::MulOp::new(&mut ir.ctx, lhs.value, rhs.value);
-            ir.inserter.insert_op(&mut ir.ctx, prod);
+            ir.inserter.insert_op(&mut ir.ctx, &prod);
             PlironFloatTensor {
                 shape: lhs.shape.clone(),
                 value: prod.get_result(&ir.ctx),
@@ -212,7 +217,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         })
     }
 
-    fn float_mul_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {
+    fn float_mul_scalar(lhs: PlironFloatTensor, rhs: burn_std::Scalar) -> PlironFloatTensor {
         todo!()
     }
 
@@ -221,7 +226,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
             let quot = pliron_tensor::tensor::ops::DivOp::new(&mut ir.ctx, lhs.value, rhs.value);
-            ir.inserter.insert_op(&mut ir.ctx, quot);
+            ir.inserter.insert_op(&mut ir.ctx, &quot);
             PlironFloatTensor {
                 shape: lhs.shape.clone(),
                 value: quot.get_result(&ir.ctx),
@@ -229,7 +234,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         })
     }
 
-    fn float_div_scalar(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironFloatTensor {
+    fn float_div_scalar(lhs: PlironFloatTensor, rhs: burn_std::Scalar) -> PlironFloatTensor {
         todo!()
     }
 
@@ -237,10 +242,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn float_remainder_scalar(
-        lhs: PlironFloatTensor,
-        rhs: burn_tensor::Scalar,
-    ) -> PlironFloatTensor {
+    fn float_remainder_scalar(lhs: PlironFloatTensor, rhs: burn_std::Scalar) -> PlironFloatTensor {
         todo!()
     }
 
@@ -261,22 +263,25 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         PLIRON_IR.with_borrow_mut(|ir| {
             let ir = ir.as_mut().unwrap();
             let tensor_ty = build_ranked_tensor_type(&mut ir.ctx, tensor.dtype(), &tensor.shape);
-            let generate_ones = pliron_tensor::tensor::ops::GenerateOp::new(&mut ir.ctx, vec![], tensor_ty,
+            let generate_ones = pliron_tensor::tensor::ops::GenerateOp::new(
+                &mut ir.ctx,
+                vec![],
+                tensor_ty,
                 |ctx, _state, inserter, _indices| {
-                    let one_attr = FPDoubleAttr::from(1.0);
+                    let one_attr = FPSingleAttr::from(1.0);
                     let return_one = pliron_llvm::ops::ConstantOp::new(ctx, Box::new(one_attr));
-                    inserter.insert_op(ctx, return_one);
+                    inserter.insert_op(ctx, &return_one);
                     return_one.get_result(ctx)
                 },
-                ()
+                (),
             );
-            ir.inserter.insert_op(&ir.ctx, generate_ones);
+            ir.inserter.insert_op(&ir.ctx, &generate_ones);
             let ones = generate_ones.get_result(&ir.ctx);
             let recip = pliron_tensor::tensor::ops::DivOp::new(&mut ir.ctx, ones, tensor.value);
-            ir.inserter.insert_op(&ir.ctx, recip);
+            ir.inserter.insert_op(&ir.ctx, &recip);
             PlironFloatTensor {
-                 shape: tensor.shape.clone(),
-                 value: recip.get_result(&ir.ctx),
+                shape: tensor.shape.clone(),
+                value: recip.get_result(&ir.ctx),
             }
         })
     }
@@ -293,7 +298,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn float_reshape(tensor: PlironFloatTensor, shape: burn_tensor::Shape) -> PlironFloatTensor {
+    fn float_reshape(tensor: PlironFloatTensor, shape: Shape) -> PlironFloatTensor {
         todo!()
     }
 
@@ -331,13 +336,13 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn float_slice(tensor: PlironFloatTensor, slices: &[burn_tensor::Slice]) -> PlironFloatTensor {
+    fn float_slice(tensor: PlironFloatTensor, slices: &[burn_std::Slice]) -> PlironFloatTensor {
         todo!()
     }
 
     fn float_slice_assign(
         tensor: PlironFloatTensor,
-        slices: &[burn_tensor::Slice],
+        slices: &[burn_std::Slice],
         value: PlironFloatTensor,
     ) -> PlironFloatTensor {
         todo!()
@@ -354,53 +359,87 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     fn float_mask_fill(
         tensor: PlironFloatTensor,
         mask: PlironBoolTensor,
-        value: burn_tensor::Scalar,
+        value: burn_std::Scalar,
     ) -> PlironFloatTensor {
         todo!()
     }
 
-    fn float_equal(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironBoolTensor {
+    fn float_equal(
+        lhs: PlironFloatTensor,
+        rhs: PlironFloatTensor,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_equal_elem(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn float_equal_elem(
+        lhs: PlironFloatTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_greater(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironBoolTensor {
+    fn float_greater(
+        lhs: PlironFloatTensor,
+        rhs: PlironFloatTensor,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_greater_elem(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn float_greater_elem(
+        lhs: PlironFloatTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_greater_equal(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironBoolTensor {
+    fn float_greater_equal(
+        lhs: PlironFloatTensor,
+        rhs: PlironFloatTensor,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
     fn float_greater_equal_elem(
         lhs: PlironFloatTensor,
-        rhs: burn_tensor::Scalar,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolDType,
     ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_lower(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironBoolTensor {
+    fn float_lower(
+        lhs: PlironFloatTensor,
+        rhs: PlironFloatTensor,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_lower_elem(lhs: PlironFloatTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn float_lower_elem(
+        lhs: PlironFloatTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn float_lower_equal(lhs: PlironFloatTensor, rhs: PlironFloatTensor) -> PlironBoolTensor {
+    fn float_lower_equal(
+        lhs: PlironFloatTensor,
+        rhs: PlironFloatTensor,
+        out_dtype: burn_std::BoolDType,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
     fn float_lower_equal_elem(
         lhs: PlironFloatTensor,
-        rhs: burn_tensor::Scalar,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolDType,
     ) -> PlironBoolTensor {
         todo!()
     }
@@ -433,7 +472,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn float_cast(tensor: PlironFloatTensor, dtype: burn_tensor::FloatDType) -> PlironFloatTensor {
+    fn float_cast(tensor: PlironFloatTensor, dtype: burn_std::FloatDType) -> PlironFloatTensor {
         todo!()
     }
 
@@ -455,7 +494,7 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
 
     fn float_powf_scalar_impl(
         tensor: PlironFloatTensor,
-        value: burn_tensor::Scalar,
+        value: burn_std::Scalar,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -540,15 +579,32 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn float_argmax(tensor: PlironFloatTensor, dim: usize) -> PlironIntTensor {
+    fn float_argmax(
+        tensor: PlironFloatTensor,
+        dim: usize,
+        out_dtype: burn_std::IntDType,
+    ) -> PlironIntTensor {
         todo!()
     }
 
-    fn float_argmin(tensor: PlironFloatTensor, dim: usize) -> PlironIntTensor {
+    fn float_argmin(
+        tensor: PlironFloatTensor,
+        dim: usize,
+        out_dtype: burn_std::IntDType,
+    ) -> PlironIntTensor {
         todo!()
     }
 
-    fn float_expand(tensor: PlironFloatTensor, shape: burn_tensor::Shape) -> PlironFloatTensor {
+    fn float_argtopk(
+        tensor: PlironFloatTensor,
+        dim: usize,
+        k: usize,
+        out_dtype: burn_std::IntDType,
+    ) -> PlironIntTensor {
+        todo!()
+    }
+
+    fn float_expand(tensor: PlironFloatTensor, shape: Shape) -> PlironFloatTensor {
         todo!()
     }
 
@@ -562,34 +618,68 @@ impl FloatTensorOps<PlironBackend> for PlironBackend {
     }
 }
 
-impl BoolTensorOps<PlironBackend> for PlironBackend {
-    fn bool_empty(shape: burn_tensor::Shape, device: &PlironDevice) -> PlironBoolTensor {
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    BoolTensorOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
+    fn bool_empty(
+        shape: Shape,
+        device: &PlironDevice,
+        bool_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn bool_zeros(shape: burn_tensor::Shape, device: &PlironDevice) -> PlironBoolTensor {
+    fn bool_zeros(
+        shape: Shape,
+        device: &PlironDevice,
+        bool_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn bool_ones(shape: burn_tensor::Shape, device: &PlironDevice) -> PlironBoolTensor {
+    fn bool_ones(
+        shape: Shape,
+        device: &PlironDevice,
+        bool_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
     async fn bool_into_data(
         tensor: PlironBoolTensor,
-    ) -> Result<burn_tensor::TensorData, burn_tensor::backend::ExecutionError> {
+    ) -> Result<TensorData, burn_backend::ExecutionError> {
         todo!()
     }
 
-    fn bool_from_data(data: burn_tensor::TensorData, device: &PlironDevice) -> PlironBoolTensor {
+    fn bool_from_data(data: TensorData, device: &PlironDevice) -> PlironBoolTensor {
         todo!()
     }
 
-    fn bool_into_int(tensor: PlironBoolTensor) -> PlironIntTensor {
+    fn bool_into_int(tensor: PlironBoolTensor, out_dtype: burn_std::IntDType) -> PlironIntTensor {
         todo!()
     }
 
-    fn bool_into_float(tensor: PlironBoolTensor) -> PlironFloatTensor {
+    fn bool_into_float(
+        tensor: PlironBoolTensor,
+        out_dtype: burn_std::FloatDType,
+    ) -> PlironFloatTensor {
+        todo!()
+    }
+
+    fn bool_select(
+        tensor: PlironBoolTensor,
+        dim: usize,
+        indices: PlironIntTensor,
+    ) -> PlironBoolTensor {
+        todo!()
+    }
+
+    fn bool_select_or(
+        tensor: PlironBoolTensor,
+        dim: usize,
+        indices: PlironIntTensor,
+        value: PlironBoolTensor,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
@@ -601,17 +691,17 @@ impl BoolTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bool_reshape(tensor: PlironBoolTensor, shape: burn_tensor::Shape) -> PlironBoolTensor {
+    fn bool_reshape(tensor: PlironBoolTensor, shape: Shape) -> PlironBoolTensor {
         todo!()
     }
 
-    fn bool_slice(tensor: PlironBoolTensor, slices: &[burn_tensor::Slice]) -> PlironBoolTensor {
+    fn bool_slice(tensor: PlironBoolTensor, slices: &[burn_std::Slice]) -> PlironBoolTensor {
         todo!()
     }
 
     fn bool_slice_assign(
         tensor: PlironBoolTensor,
-        slices: &[burn_tensor::Slice],
+        slices: &[burn_std::Slice],
         value: PlironBoolTensor,
     ) -> PlironBoolTensor {
         todo!()
@@ -628,7 +718,7 @@ impl BoolTensorOps<PlironBackend> for PlironBackend {
     fn bool_mask_fill(
         tensor: PlironBoolTensor,
         mask: PlironBoolTensor,
-        value: burn_tensor::Scalar,
+        value: burn_std::Scalar,
     ) -> PlironBoolTensor {
         todo!()
     }
@@ -654,7 +744,7 @@ impl BoolTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bool_equal_elem(lhs: PlironBoolTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn bool_equal_elem(lhs: PlironBoolTensor, rhs: burn_std::Scalar) -> PlironBoolTensor {
         todo!()
     }
 
@@ -682,7 +772,7 @@ impl BoolTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bool_expand(tensor: PlironBoolTensor, shape: burn_tensor::Shape) -> PlironBoolTensor {
+    fn bool_expand(tensor: PlironBoolTensor, shape: Shape) -> PlironBoolTensor {
         todo!()
     }
 
@@ -696,22 +786,24 @@ impl BoolTensorOps<PlironBackend> for PlironBackend {
     }
 }
 
-impl IntTensorOps<PlironBackend> for PlironBackend {
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    IntTensorOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
     fn int_empty(
-        shape: burn_tensor::Shape,
+        shape: Shape,
         device: &PlironDevice,
-        dtype: burn_tensor::IntDType,
+        dtype: burn_std::IntDType,
     ) -> PlironIntTensor {
         todo!()
     }
 
     async fn int_into_data(
         tensor: PlironIntTensor,
-    ) -> Result<burn_tensor::TensorData, burn_tensor::backend::ExecutionError> {
+    ) -> Result<TensorData, burn_backend::ExecutionError> {
         todo!()
     }
 
-    fn int_from_data(data: burn_tensor::TensorData, device: &PlironDevice) -> PlironIntTensor {
+    fn int_from_data(data: TensorData, device: &PlironDevice) -> PlironIntTensor {
         todo!()
     }
 
@@ -723,23 +815,26 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_reshape(tensor: PlironIntTensor, shape: burn_tensor::Shape) -> PlironIntTensor {
+    fn int_reshape(tensor: PlironIntTensor, shape: Shape) -> PlironIntTensor {
         todo!()
     }
 
-    fn int_slice(tensor: PlironIntTensor, slices: &[burn_tensor::Slice]) -> PlironIntTensor {
+    fn int_slice(tensor: PlironIntTensor, slices: &[burn_std::Slice]) -> PlironIntTensor {
         todo!()
     }
 
     fn int_slice_assign(
         tensor: PlironIntTensor,
-        slices: &[burn_tensor::Slice],
+        slices: &[burn_std::Slice],
         value: PlironIntTensor,
     ) -> PlironIntTensor {
         todo!()
     }
 
-    fn int_into_float(tensor: PlironIntTensor) -> PlironFloatTensor {
+    fn int_into_float(
+        tensor: PlironIntTensor,
+        out_dtype: burn_std::FloatDType,
+    ) -> PlironFloatTensor {
         todo!()
     }
 
@@ -754,7 +849,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
     fn int_mask_fill(
         tensor: PlironIntTensor,
         mask: PlironBoolTensor,
-        value: burn_tensor::Scalar,
+        value: burn_std::Scalar,
     ) -> PlironIntTensor {
         todo!()
     }
@@ -793,43 +888,83 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_equal(lhs: PlironIntTensor, rhs: PlironIntTensor) -> PlironBoolTensor {
+    fn int_equal(
+        lhs: PlironIntTensor,
+        rhs: PlironIntTensor,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_equal_elem(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn int_equal_elem(
+        lhs: PlironIntTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_greater(lhs: PlironIntTensor, rhs: PlironIntTensor) -> PlironBoolTensor {
+    fn int_greater(
+        lhs: PlironIntTensor,
+        rhs: PlironIntTensor,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_greater_elem(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn int_greater_elem(
+        lhs: PlironIntTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_greater_equal(lhs: PlironIntTensor, rhs: PlironIntTensor) -> PlironBoolTensor {
+    fn int_greater_equal(
+        lhs: PlironIntTensor,
+        rhs: PlironIntTensor,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_greater_equal_elem(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn int_greater_equal_elem(
+        lhs: PlironIntTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_lower(lhs: PlironIntTensor, rhs: PlironIntTensor) -> PlironBoolTensor {
+    fn int_lower(
+        lhs: PlironIntTensor,
+        rhs: PlironIntTensor,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_lower_elem(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn int_lower_elem(
+        lhs: PlironIntTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_lower_equal(lhs: PlironIntTensor, rhs: PlironIntTensor) -> PlironBoolTensor {
+    fn int_lower_equal(
+        lhs: PlironIntTensor,
+        rhs: PlironIntTensor,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
-    fn int_lower_equal_elem(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironBoolTensor {
+    fn int_lower_equal_elem(
+        lhs: PlironIntTensor,
+        rhs: burn_std::Scalar,
+        out_dtype: burn_std::BoolStore,
+    ) -> PlironBoolTensor {
         todo!()
     }
 
@@ -837,7 +972,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_add_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn int_add_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -845,7 +980,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_sub_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn int_sub_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -853,7 +988,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_mul_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn int_mul_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -861,7 +996,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_div_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn int_div_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -869,7 +1004,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn int_remainder_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn int_remainder_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -921,6 +1056,10 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
+    fn int_argtopk(tensor: PlironIntTensor, dim: usize, k: usize) -> PlironIntTensor {
+        todo!()
+    }
+
     fn int_abs(tensor: PlironIntTensor) -> PlironIntTensor {
         todo!()
     }
@@ -938,14 +1077,15 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
     }
 
     fn int_random(
-        shape: burn_tensor::Shape,
-        distribution: burn_tensor::Distribution,
+        shape: Shape,
+        distribution: burn_std::Distribution,
         device: &PlironDevice,
+        dtype: burn_std::IntDType,
     ) -> PlironIntTensor {
         todo!()
     }
 
-    fn int_expand(tensor: PlironIntTensor, shape: burn_tensor::Shape) -> PlironIntTensor {
+    fn int_expand(tensor: PlironIntTensor, shape: Shape) -> PlironIntTensor {
         todo!()
     }
 
@@ -953,7 +1093,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bitwise_and_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn bitwise_and_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -961,7 +1101,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bitwise_or_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn bitwise_or_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -969,7 +1109,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bitwise_xor_scalar(lhs: PlironIntTensor, rhs: burn_tensor::Scalar) -> PlironIntTensor {
+    fn bitwise_xor_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -981,10 +1121,7 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bitwise_left_shift_scalar(
-        lhs: PlironIntTensor,
-        rhs: burn_tensor::Scalar,
-    ) -> PlironIntTensor {
+    fn bitwise_left_shift_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
@@ -992,14 +1129,11 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn bitwise_right_shift_scalar(
-        lhs: PlironIntTensor,
-        rhs: burn_tensor::Scalar,
-    ) -> PlironIntTensor {
+    fn bitwise_right_shift_scalar(lhs: PlironIntTensor, rhs: burn_std::Scalar) -> PlironIntTensor {
         todo!()
     }
 
-    fn int_cast(tensor: PlironIntTensor, dtype: burn_tensor::IntDType) -> PlironIntTensor {
+    fn int_cast(tensor: PlironIntTensor, dtype: burn_std::IntDType) -> PlironIntTensor {
         todo!()
     }
 
@@ -1013,24 +1147,32 @@ impl IntTensorOps<PlironBackend> for PlironBackend {
     }
 }
 
-impl ActivationOps<PlironBackend> for PlironBackend {}
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    ActivationOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
+}
 
-impl TransactionOps<PlironBackend> for PlironBackend {}
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    TransactionOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
+}
 
-impl QTensorOps<PlironBackend> for PlironBackend {
-    fn q_from_data(data: burn_tensor::TensorData, device: &PlironDevice) -> PlironQTensor {
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    QTensorOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
+    fn q_from_data(data: TensorData, device: &PlironDevice) -> PlironQTensor {
         todo!()
     }
 
     fn quantize(
         tensor: PlironFloatTensor,
-        scheme: &burn_tensor::quantization::QuantScheme,
-        qparams: burn_backend::tensor::quantization::QuantizationParametersPrimitive<PlironBackend>,
+        scheme: &burn_std::quantization::QuantScheme,
+        qparams: burn_backend::quantization::QuantizationParametersPrimitive<Pliron<F, I, B>>,
     ) -> PlironQTensor {
         todo!()
     }
 
-    fn dequantize(tensor: PlironQTensor) -> PlironFloatTensor {
+    fn dequantize(tensor: PlironQTensor, out_dtype: burn_std::FloatDType) -> PlironFloatTensor {
         todo!()
     }
 
@@ -1042,17 +1184,17 @@ impl QTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn q_reshape(tensor: PlironQTensor, shape: burn_tensor::Shape) -> PlironQTensor {
+    fn q_reshape(tensor: PlironQTensor, shape: Shape) -> PlironQTensor {
         todo!()
     }
 
     async fn q_into_data(
         tensor: PlironQTensor,
-    ) -> Result<burn_tensor::TensorData, burn_tensor::backend::ExecutionError> {
+    ) -> Result<TensorData, burn_backend::ExecutionError> {
         todo!()
     }
 
-    fn q_expand(tensor: PlironQTensor, shape: burn_tensor::Shape) -> PlironQTensor {
+    fn q_expand(tensor: PlironQTensor, shape: Shape) -> PlironQTensor {
         todo!()
     }
 
@@ -1072,17 +1214,35 @@ impl QTensorOps<PlironBackend> for PlironBackend {
         todo!()
     }
 
-    fn q_slice(tensor: PlironQTensor, slices: &[burn_tensor::Slice]) -> PlironQTensor {
+    fn q_slice(tensor: PlironQTensor, slices: &[burn_std::Slice]) -> PlironQTensor {
         todo!()
     }
 }
 
-impl ModuleOps<PlironBackend> for PlironBackend {
+impl<F: Send + Sync + 'static, I: Send + Sync + 'static, B: Send + Sync + 'static>
+    ModuleOps<Pliron<F, I, B>> for Pliron<F, I, B>
+{
+    fn rfft(
+        tensor: PlironFloatTensor,
+        n: usize,
+        dim: Option<usize>,
+    ) -> (PlironFloatTensor, PlironFloatTensor) {
+        todo!()
+    }
+
+    fn irfft(
+        real: PlironFloatTensor,
+        imag: PlironFloatTensor,
+        n: usize,
+        dim: Option<usize>,
+    ) -> PlironFloatTensor {
+        todo!()
+    }
     fn conv2d(
         x: PlironFloatTensor,
         weight: PlironFloatTensor,
         bias: Option<PlironFloatTensor>,
-        options: burn_tensor::ops::ConvOptions<2>,
+        options: burn_std::ops::ConvOptions<2>,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1093,7 +1253,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         weight: PlironFloatTensor,
         mask: Option<PlironFloatTensor>,
         bias: Option<PlironFloatTensor>,
-        options: burn_tensor::ops::DeformConvOptions<2>,
+        options: burn_std::ops::DeformConvOptions<2>,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1105,8 +1265,8 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         mask: Option<PlironFloatTensor>,
         bias: Option<PlironFloatTensor>,
         output_grad: PlironFloatTensor,
-        options: burn_tensor::ops::DeformConvOptions<2>,
-    ) -> burn_tensor::ops::DeformConv2dBackward<PlironBackend> {
+        options: burn_std::ops::DeformConvOptions<2>,
+    ) -> burn_backend::ops::DeformConv2dBackward<Pliron<F, I, B>> {
         todo!()
     }
 
@@ -1114,7 +1274,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         x: PlironFloatTensor,
         weight: PlironFloatTensor,
         bias: Option<PlironFloatTensor>,
-        options: burn_tensor::ops::ConvOptions<3>,
+        options: burn_std::ops::ConvOptions<3>,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1123,7 +1283,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         x: PlironFloatTensor,
         weight: PlironFloatTensor,
         bias: Option<PlironFloatTensor>,
-        options: burn_tensor::ops::ConvTransposeOptions<2>,
+        options: burn_std::ops::ConvTransposeOptions<2>,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1132,7 +1292,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         x: PlironFloatTensor,
         weight: PlironFloatTensor,
         bias: Option<PlironFloatTensor>,
-        options: burn_tensor::ops::ConvTransposeOptions<3>,
+        options: burn_std::ops::ConvTransposeOptions<3>,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1189,7 +1349,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         padding: [usize; 2],
         dilation: [usize; 2],
         ceil_mode: bool,
-    ) -> burn_tensor::ops::MaxPool2dWithIndices<PlironBackend> {
+    ) -> burn_backend::ops::MaxPool2dWithIndices<Pliron<F, I, B>> {
         todo!()
     }
 
@@ -1202,14 +1362,14 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         ceil_mode: bool,
         output_grad: PlironFloatTensor,
         indices: PlironIntTensor,
-    ) -> burn_tensor::ops::MaxPool2dBackward<PlironBackend> {
+    ) -> burn_backend::ops::MaxPool2dBackward<Pliron<F, I, B>> {
         todo!()
     }
 
     fn interpolate(
         x: PlironFloatTensor,
         output_size: [usize; 2],
-        options: burn_tensor::ops::InterpolateOptions,
+        options: burn_std::ops::InterpolateOptions,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1218,7 +1378,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         x: PlironFloatTensor,
         grad: PlironFloatTensor,
         output_size: [usize; 2],
-        options: burn_tensor::ops::InterpolateOptions,
+        options: burn_std::ops::InterpolateOptions,
     ) -> PlironFloatTensor {
         todo!()
     }
@@ -1229,7 +1389,7 @@ impl ModuleOps<PlironBackend> for PlironBackend {
         value: PlironFloatTensor,
         mask: Option<PlironBoolTensor>,
         attn_bias: Option<PlironFloatTensor>,
-        options: burn_tensor::ops::AttentionModuleOptions,
+        options: burn_std::ops::AttentionModuleOptions,
     ) -> PlironFloatTensor {
         todo!()
     }

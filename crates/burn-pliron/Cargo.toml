@@ -8,14 +8,24 @@ authors = ["vaivaswatha <vaivaswatha@gmail.com>"]
 description = "pliron backend for the Burn framework"
 keywords = ["deep-learning", "machine-learning", "data", "pliron"]
 
+[features]
+default = ["std"]
+doc = ["default"]
+std = ["burn-backend/std", "burn-std/std", "burn-ndarray/std"]
+tracing = ["burn-backend/tracing", "burn-std/tracing", "burn-ndarray/tracing"]
+
 [dependencies]
 burn-backend = { path = "../burn-backend", default-features = false }
-burn-tensor = { path = "../burn-tensor", default-features = false }
+burn-std = { path = "../burn-std", default-features = false }
 burn-ndarray = { path = "../burn-ndarray", default-features = false }
-pliron = { git = "https://github.com/vaivaswatha/pliron.git" }
-pliron-llvm = { git = "https://github.com/vaivaswatha/pliron.git" }
-pliron-common-dialects = { git = "https://github.com/vaivaswatha/pliron-common-dialects.git" }
-pliron-tensor = { git = "https://github.com/vaivaswatha/pliron-tensor.git" }
+pliron = { git = "https://github.com/pliron-org/pliron.git" }
+pliron-llvm = { git = "https://github.com/pliron-org/pliron.git" }
+pliron-common-dialects = { git = "https://github.com/pliron-org/pliron-common-dialects.git" }
+pliron-tensor = { git = "https://github.com/pliron-org/pliron-tensor.git" }
+
+[dev-dependencies]
+burn-dispatch = { path = "../burn-dispatch", features = ["pliron"] }
+burn-tensor = { path = "../burn-tensor", default-features = false }
 
 [lints]
 workspace = true

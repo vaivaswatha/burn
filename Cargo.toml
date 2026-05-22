@@ -206,6 +206,7 @@ burn-nn = { path = "crates/burn-nn", version = "0.22.0-pre.1", default-features 
 burn-optim = { path = "crates/burn-optim", version = "0.22.0-pre.1", default-features = false }
 burn-remote = { path = "crates/burn-remote", version = "0.22.0-pre.1", default-features = false }
 burn-rl = { path = "crates/burn-rl", version = "0.22.0-pre.1", default-features = false }
+burn-pliron = { path = "crates/burn-pliron", version = "0.22.0-pre.1", default-features = false }
 burn-rocm = { path = "crates/burn-rocm", version = "0.22.0-pre.1", default-features = false }
 burn-router = { path = "crates/burn-router", version = "0.22.0-pre.1", default-features = false }
 burn-std = { path = "crates/burn-std", version = "0.22.0-pre.1", default-features = false }

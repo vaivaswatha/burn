@@ -91,6 +91,10 @@ pub mod backends {
     pub use burn_ndarray as ndarray;
     #[cfg(any(feature = "ndarray", default_backend))]
     pub use burn_ndarray::NdArray;
+    #[cfg(feature = "pliron")]
+    pub use burn_pliron as pliron;
+    #[cfg(feature = "pliron")]
+    pub use burn_pliron::Pliron;
     #[cfg(feature = "tch")]
     pub use burn_tch as libtorch;
     #[cfg(feature = "tch")]
@@ -116,6 +120,8 @@ pub mod devices {
     pub use burn_flex::FlexDevice;
     #[cfg(any(feature = "ndarray", default_backend))]
     pub use burn_ndarray::NdArrayDevice;
+    #[cfg(feature = "pliron")]
+    pub use burn_pliron::PlironDevice;
     #[cfg(feature = "tch")]
     pub use burn_tch::LibTorchDevice;
 }

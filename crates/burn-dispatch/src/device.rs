@@ -54,6 +54,10 @@ pub enum DispatchDevice {
     #[cfg(any(feature = "ndarray", default_backend))]
     NdArray(NdArrayDevice),
 
+    /// The [Pliron backend](Pliron) device.
+    #[cfg(feature = "pliron")]
+    Pliron(PlironDevice),
+
     /// The [LibTorch backend](LibTorch) device.
     #[cfg(feature = "tch")]
     LibTorch(LibTorchDevice),
@@ -150,6 +154,8 @@ impl core::fmt::Debug for DispatchDevice {
             Self::Flex(device) => f.debug_tuple("Flex").field(device).finish(),
             #[cfg(any(feature = "ndarray", default_backend))]
             Self::NdArray(device) => f.debug_tuple("NdArray").field(device).finish(),
+            #[cfg(feature = "pliron")]
+            Self::Pliron(device) => f.debug_tuple("Pliron").field(device).finish(),
             #[cfg(feature = "tch")]
             Self::LibTorch(device) => f.debug_tuple("LibTorch").field(device).finish(),
             #[cfg(feature = "autodiff")]
@@ -231,6 +237,13 @@ impl Default for DispatchDevice {
                             "BURN_DEVICE=ndarray requested, but the 'ndarray' feature is not enabled."
                         );
                     }
+                       "pliron" => {
+                           #[cfg(feature = "pliron")]
+                           return Self::Pliron(PlironDevice::default());
+                           panic!(
+                               "BURN_DEVICE=pliron requested, but the 'pliron' feature is not enabled."
+                           );
+                       }
                     _ => panic!("Unknown BURN_DEVICE override: '{}'.", device_str),
                 }
             }
@@ -245,6 +258,8 @@ impl Default for DispatchDevice {
         #[cfg(feature = "rocm")]
         return Self::Rocm(RocmDevice::default());
 
+        #[cfg(feature = "pliron")]
+        return Self::Pliron(PlironDevice::default());
         #[cfg(wgpu_vulkan)]
         return Self::Vulkan(burn_wgpu::WgpuDevice::default());
 
@@ -300,6 +315,8 @@ impl PartialEq for DispatchDevice {
             (Self::NdArray(a), Self::NdArray(b)) => a == b,
             #[cfg(feature = "tch")]
             (Self::LibTorch(a), Self::LibTorch(b)) => a == b,
+               #[cfg(feature = "pliron")]
+               (Self::Pliron(a), Self::Pliron(b)) => a == b,
             #[allow(unreachable_patterns)]
             (_, _) => false,
         }
@@ -361,6 +378,8 @@ impl DispatchDevice {
             Self::NdArray(_) => DispatchDeviceId::NdArray,
             #[cfg(feature = "tch")]
             Self::LibTorch(_) => DispatchDeviceId::LibTorch,
+               #[cfg(feature = "pliron")]
+               Self::Pliron(_) => DispatchDeviceId::Pliron,
             #[cfg(feature = "autodiff")]
             Self::Autodiff(device) => device.inner.backend_id(),
         }
@@ -398,6 +417,7 @@ pub enum DispatchDeviceId {
     Flex = 4,
     LibTorch = 5,
     NdArray = 6,
+    Pliron = 7,
 }
 
 impl From<DispatchDeviceId> for u16 {
@@ -425,6 +445,8 @@ impl TryFrom<u16> for DispatchDeviceId {
             5 => Ok(Self::LibTorch),
             #[cfg(any(feature = "ndarray", default_backend))]
             6 => Ok(Self::NdArray),
+               #[cfg(feature = "pliron")]
+               7 => Ok(Self::Pliron),
             _ => Err(()),
         }
     }
@@ -454,6 +476,8 @@ impl burn_backend::Device for DispatchDevice {
             DispatchDeviceId::Flex => Self::Flex(FlexDevice::from_id(device_id)),
             #[cfg(any(feature = "ndarray", default_backend))]
             DispatchDeviceId::NdArray => Self::NdArray(NdArrayDevice::from_id(device_id)),
+            #[cfg(feature = "pliron")]
+            DispatchDeviceId::Pliron => Self::Pliron(PlironDevice::from_id(device_id)),
             #[cfg(feature = "tch")]
             DispatchDeviceId::LibTorch => Self::LibTorch(LibTorchDevice::from_id(device_id)),
             _ => unreachable!("No backend feature enabled."),
@@ -478,6 +502,8 @@ impl burn_backend::Device for DispatchDevice {
             Self::Flex(device) => device.to_id(),
             #[cfg(any(feature = "ndarray", default_backend))]
             Self::NdArray(device) => device.to_id(),
+            #[cfg(feature = "pliron")]
+            Self::Pliron(device) => device.to_id(),
             #[cfg(feature = "tch")]
             Self::LibTorch(device) => device.to_id(),
             #[cfg(feature = "autodiff")]
@@ -541,6 +567,13 @@ impl From<FlexDevice> for DispatchDevice {
 impl From<NdArrayDevice> for DispatchDevice {
     fn from(device: NdArrayDevice) -> Self {
         DispatchDevice::NdArray(device)
+    }
+}
+
+#[cfg(feature = "pliron")]
+impl From<PlironDevice> for DispatchDevice {
+    fn from(device: PlironDevice) -> Self {
+        DispatchDevice::Pliron(device)
     }
 }
 

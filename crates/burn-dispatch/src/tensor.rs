@@ -229,6 +229,10 @@ pub enum DispatchTensorKind {
     #[cfg(any(feature = "ndarray", default_backend))]
     NdArray(BackendTensor<NdArray>),
 
+    /// The [Pliron backend](Pliron) tensor.
+    #[cfg(feature = "pliron")]
+    Pliron(BackendTensor<Pliron>),
+
     /// The [LibTorch backend](LibTorch) tensor.
     #[cfg(feature = "tch")]
     LibTorch(BackendTensor<LibTorch>),
@@ -257,6 +261,8 @@ impl TensorMetadata for DispatchTensorKind {
             Self::Flex(tensor) => tensor.dtype(),
             #[cfg(any(feature = "ndarray", default_backend))]
             Self::NdArray(tensor) => tensor.dtype(),
+            #[cfg(feature = "pliron")]
+            Self::Pliron(tensor) => tensor.dtype(),
             #[cfg(feature = "tch")]
             Self::LibTorch(tensor) => tensor.dtype(),
             #[cfg(feature = "autodiff")]
@@ -282,6 +288,8 @@ impl TensorMetadata for DispatchTensorKind {
             Self::Flex(tensor) => tensor.shape(),
             #[cfg(any(feature = "ndarray", default_backend))]
             Self::NdArray(tensor) => tensor.shape(),
+            #[cfg(feature = "pliron")]
+            Self::Pliron(tensor) => tensor.shape(),
             #[cfg(feature = "tch")]
             Self::LibTorch(tensor) => tensor.shape(),
             #[cfg(feature = "autodiff")]
@@ -309,6 +317,8 @@ impl QTensorPrimitive for DispatchTensorKind {
             Self::Flex(tensor) => tensor.scheme(),
             #[cfg(any(feature = "ndarray", default_backend))]
             Self::NdArray(tensor) => tensor.scheme(),
+            #[cfg(feature = "pliron")]
+            Self::Pliron(tensor) => tensor.scheme(),
             #[cfg(feature = "tch")]
             Self::LibTorch(tensor) => tensor.scheme(),
             #[cfg(feature = "autodiff")]

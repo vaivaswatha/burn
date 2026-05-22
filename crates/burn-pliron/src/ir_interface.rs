@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 
-use burn_tensor::{DType, TensorData};
+use burn_std::{DType, TensorData};
 use pliron::{
     builtin::{op_interfaces::SingleBlockRegionInterface, types::Signedness},
     context::Context,
@@ -19,9 +19,8 @@ use pliron_common_dialects::cf::to_llvm::CFToLLVM;
 use pliron_llvm::llvm_sys::{core::LLVMContext, lljit::LLVMLLJIT, target::initialize_native};
 use pliron_tensor::{
     memref::{conversions::MemrefToCF, type_interfaces::Dimension},
-    tensor::{
-        conversions::TensorToMemref, runtime_utils::TensorDesciptor, types::RankedTensorType,
-    },
+    tensor::bufferize::{MallocFreeTMM, bufferize},
+    tensor::{runtime_utils::TensorDesciptor, types::RankedTensorType},
 };
 
 #[derive(Default)]
@@ -46,8 +45,8 @@ thread_local! {
 /// which can be used to construct pliron tensors.
 /// The caller must ensure that the tensor data is not dropped
 /// while the pliron tensor is still in use by the IR.
-pub(crate) fn to_pliron_tensor_descriptor(t: &burn_tensor::TensorData) -> TensorDesciptor {
-    TensorDesciptor::new(t.shape.clone(), t.dtype.size(), t.bytes.as_ptr())
+pub(crate) fn to_pliron_tensor_descriptor(t: &TensorData) -> TensorDesciptor {
+    TensorDesciptor::new(t.shape.to_vec(), t.dtype.size(), t.bytes.as_ptr())
 }
 
 /// Initialize (if not already) [PlironIR] for the current thread.
@@ -103,7 +102,7 @@ pub(crate) fn build_ranked_tensor_type(
         DType::U64 => {
             pliron::builtin::types::IntegerType::get(ctx, 64, Signedness::Signless).into()
         }
-        DType::Bool => {
+        DType::Bool(_) => {
             pliron::builtin::types::IntegerType::get(ctx, 1, Signedness::Signless).into()
         }
         _ => unimplemented!("Unsupported data type"),
@@ -118,7 +117,11 @@ pub(crate) fn build_ranked_tensor_type(
 pub(crate) fn exec_pliron_ir(ir: &mut PlironIR) {
     let module = ir.module.unwrap();
     let module_operation = module.get_operation();
-    apply_dialect_conversion(&mut ir.ctx, &mut TensorToMemref, module_operation).expect_ok(&ir.ctx);
+    let mut tmm = MallocFreeTMM;
+
+    // println!("Bufferizing the IR: {}", module.disp(&ir.ctx));
+
+    bufferize(&mut tmm, module_operation, &mut ir.ctx).expect_ok(&ir.ctx);
     apply_dialect_conversion(&mut ir.ctx, &mut MemrefToCF, module_operation).expect_ok(&ir.ctx);
     apply_dialect_conversion(&mut ir.ctx, &mut CFToLLVM, module_operation).expect_ok(&ir.ctx);
     verify_op(&module, &ir.ctx).expect_ok(&ir.ctx);
@@ -130,6 +133,8 @@ pub(crate) fn exec_pliron_ir(ir: &mut PlironIR) {
         .verify()
         .inspect_err(|e| println!("LLVM-IR verification failed: {}", e))
         .unwrap();
+
+    // println!("Generated LLVM-IR:\n{}", llvm_ir.to_string());
 
     let jit = LLVMLLJIT::new_with_default_builder().expect("Failed to create LLJIT");
     jit.add_module(llvm_ir)
